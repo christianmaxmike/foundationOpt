@@ -2,9 +2,9 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH --partition=a100
 #SBATCH --job-name=generation
-#SBATCH --time=12:00:00
+#SBATCH --time=5:00:00
 #SBATCH --export=NONE
-#SBATCH --output=out_generationSolver.txt
+#SBATCH --output=out_gen3d.txt
 
 unset SLURM_EXPORT_ENV
 module load python
@@ -16,4 +16,4 @@ pip install python==3.12.7
 pip install dill
 pip install hebo
 
-python generation.py
+python generation_trigonometric.py multi_$1

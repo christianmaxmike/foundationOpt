@@ -176,4 +176,3 @@ output*/
 *.npz
 *.dill
 *.txt
-*.sh
