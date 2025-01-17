@@ -1,8 +1,8 @@
 #!/bin/bash -l
-#SBATCH --gres=gpu:a100:1
-#SBATCH --partition=a100
+#SBATCH --nodes=1
+#SBATCH --partition=singlenode
 #SBATCH --job-name=generation
-#SBATCH --time=5:00:00
+#SBATCH --time=15:00:00
 #SBATCH --export=NONE
 #SBATCH --output=out_gen3d.txt
 

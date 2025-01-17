@@ -8,8 +8,6 @@ missing_ids = []
 pattern = r'data_multi_(\d+)\.npz'
 number_set = set(range(200))
 
-
-
 for file in os.listdir(directory):
     filename = os.fsdecode(file)
     if filename.endswith(".npz") or filename.endswith(".py"): 

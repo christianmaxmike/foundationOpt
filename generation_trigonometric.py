@@ -8,6 +8,24 @@ import argparse
 np.random.seed(42)
 
 
+def chris_fnc_random(x, min_num_components=1, max_num_components=8) -> np.ndarray:
+    batch_y = np.zeros((x.shape[0], x.shape[1]))
+    for batch_idx, batch in enumerate(range(x.shape[0])):
+        num_components = np.random.randint(min_num_components, max_num_components)
+        y_values = np.zeros((x.shape[1]), dtype=np.float16)
+        for _ in range(num_components):
+            amplitude = np.random.uniform(0.5, 2.0) 
+            y_tmp = np.ones((x.shape[1]), dtype=np.float16)
+            for dim_idx , dim in enumerate(range(x.shape[1])):
+                trigonometric = np.sin if np.random.rand() < 0.5 else np.cos
+                frequency = np.random.uniform(0.05, 0.25) 
+                phase = np.random.uniform(1,5) 
+                y_tmp *= trigonometric(frequency * x[batch_idx, :, dim_idx] + phase)
+            y_values += amplitude * y_tmp
+        batch_y[batch_idx] = y_values
+    return batch_y
+
+
 def obj(params : pd.DataFrame, fnc_dict) -> np.ndarray:
     """
     Load function from the attached function dictionary and return y values of the x values stored in the attached
@@ -27,22 +45,14 @@ def obj(params : pd.DataFrame, fnc_dict) -> np.ndarray:
           trigonometric = fnc_dict['trigonometrics'][i][dim_idx]
           y_tmp *= trigonometric(frequency * params.iloc[:, dim_idx].values + phase)
         y_values += amplitude * y_tmp
+
+    # normalize values
+    y_values = (y_values - np.min(y_values)) / (np.max(y_values) - np.min(y_values))
     return y_values
 
 
 def gen_trigonometric_fncs(batch_size, dims, min_x_value, max_x_value, sequence_length, min_num_components, max_num_components):
-    print(f"Start generating fnc with dimension {dims} of length {sequence_length}.")
-    
-    # grid_size = tuple([sequence_length]*dims)
-
-    # Generate x values for the sequence
-    # xs_linspaces = [np.linspace(min_x_value, max_x_value, sequence_length, dtype=np.uint8) for _ in range(dims)]
-    # x_meshgrid = np.meshgrid(*xs_linspaces, sparse=True)
-    #x_mesh_facet = np.broadcast_to(x_meshgrid[0], grid_size)
-
-    # Initialize the batch array
-    # batch = np.zeros((batch_size, *grid_size), dtype=np.float16)
-
+    print(f"Start generating fnc with dimension {dims} of length {sequence_length}.")    
     # list containing synthesized trigonometric functions
     fnc_list = []
 
@@ -56,13 +66,9 @@ def gen_trigonometric_fncs(batch_size, dims, min_x_value, max_x_value, sequence_
 
         # Randomize parameters for multiple components
         num_components = np.random.randint(min_num_components, max_num_components)  # Number of sine/cosine components
-        # y_values = np.zeros_like(x1)
-        #y_values = np.zeros(grid_size, dtype=np.float16)
 
         for _ in range(num_components):
-            # y_tmp = np.ones(grid_size)
-            
-            amplitude = np.random.uniform(0.5, 2.0)  # Amplitude between 0.5 and 2.0
+            amplitude = np.random.uniform(0.05, 1.0)  # Amplitude between 0.5 and 2.0
 
             comp_freq = []
             comp_phases = []
@@ -70,17 +76,12 @@ def gen_trigonometric_fncs(batch_size, dims, min_x_value, max_x_value, sequence_
 
             for dim_idx , dim in enumerate(range(dims)):
                 trigonometric = np.sin if np.random.rand() < 0.5 else np.cos
-                frequency = np.random.uniform(0.05, 0.25) #(0.5, 2.0)  # Frequency between 0.5 and 2.0
-                phase = np.random.uniform(1,5) #(0, 2 * np.pi)  # Phase shift
-
-                # x_curr = np.broadcast_to(x_meshgrid[dim_idx], grid_size)
-                # y_tmp *= trigonometric(frequency * x_curr + phase)
+                frequency = np.random.uniform(1, 15) #(0.5, 2.0)  # Frequency between 0.5 and 2.0
+                phase = np.random.uniform(1,10) #(0, 2 * np.pi)  # Phase shift
 
                 comp_freq.append(frequency)
                 comp_phases.append(phase)
                 comp_trigonometrics.append(trigonometric)
-
-            #y_values += amplitude * y_tmp
 
             frequencies.append(comp_freq)
             phases.append(comp_phases)
@@ -95,9 +96,6 @@ def gen_trigonometric_fncs(batch_size, dims, min_x_value, max_x_value, sequence_
         fnc_dict['num_components'] = num_components
 
         fnc_list.append(fnc_dict)
-
-        # Assign to the batch
-        # batch[i] = y_values
     return fnc_list
 
 
@@ -141,6 +139,7 @@ def load_batch(filename, model_fn):
 
 
 if __name__=="__main__":
+
     parser = argparse.ArgumentParser()
     parser.add_argument("id")
     args = parser.parse_args()
@@ -151,10 +150,11 @@ if __name__=="__main__":
     min_num_components = 1
     max_num_components = 8
     min_x_value = 0
-    max_x_value = 100 # 4 * np.pi
+    max_x_value = 1 # 100 # 4 * np.pi
     min_dim = 2
-    max_dim = 16
+    max_dim = 4
 
+    num_hebo_runs = 10
     num_hebo_steps = 100
 
     hebo_total_xs = []
@@ -164,10 +164,11 @@ if __name__=="__main__":
         # generate trigonometric fncs
         fnc_list = gen_trigonometric_fncs(1, dim, min_x_value, max_x_value, sequence_length, min_num_components, max_num_components)
 
-        # run hebo
-        hebo_xs, hebo_ys = run_hebo(num_hebo_steps, fnc_list, dim, min_x_value, max_x_value)
-        hebo_total_xs.append(hebo_xs)
-        hebo_total_ys.append(hebo_ys)
+        for _ in range(num_hebo_runs):
+            # run hebo
+            hebo_xs, hebo_ys = run_hebo(num_hebo_steps, fnc_list, dim, min_x_value, max_x_value)
+            hebo_total_xs.append(hebo_xs)
+            hebo_total_ys.append(hebo_ys)
 
     array_l = []
     #max_length = max(len(hebo_total_xs[i][0][0]) for i in range(len(hebo_total_xs)))
