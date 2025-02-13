@@ -9,6 +9,8 @@ import wandb
 
 from model.architecture import TabFound
 import os
+import optuna
+from optuna import Trial
 
 os.environ['WANDB_INIT_TIMEOUT'] = '600'
 
@@ -51,35 +53,28 @@ def split_data(X, y):
     return X_train, X_test, X_val, y_train, y_test, y_val
 
 
-def main(args):
-    # directory = os.path.join("data", "single", "1D")
-    directory = os.path.join("datasets", "single", "merged")
-
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-
-    wandb.init(
-        project='FoundationOpt',
-        config=args
-    )
-
-    X, y = get_data(directory)
+def run_study(trial: Trial, X, y, args) -> float:
     X_train, X_test, X_val, y_train, y_test, y_val = split_data(X, y)
+
+    lr = trial.suggest_categorical("learning_rate", [1e-3, 1e-4])
+    dropout_rate = trial.suggest_float("dropout_rate", 0.1, 0.5)
+    batch_size = trial.suggest_categorical("batch_size", [512, 1024, 2048])
+
+
 
     input_features = X_train.shape[2]
     model = TabFound(
         input_features=input_features,
         nr_blocks=args.nr_blocks,
         nr_heads=args.nr_heads,
-        dropout=args.dropout_rate,
+        dropout=dropout_rate,
         nr_hyperparameters=input_features,
     )
 
     wandb.watch(model)
     nr_epochs = args.nr_epochs
-    batch_size = args.batch_size
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-
+    # batch_size = args.batch_size
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
     model = model.to(dev)
@@ -171,10 +166,10 @@ def main(args):
     # Test Loop
     model.eval()
 
+    eval_loss = 0.0
     with torch.no_grad():
         X_test= torch.tensor(X_test, dtype=torch.float32)
         X_test = X_test.to(dev)
-        eval_loss = 0.0
         for j in range(0, X_test.shape[0], batch_size):
             if j + batch_size > X_test.shape[0]:
                 break
@@ -194,6 +189,31 @@ def main(args):
 
     # save the model
     #torch.save(model.state_dict(), os.path.join(args.output_dir, "model.pt"))
+
+    return eval_loss
+
+def main(args):
+    # directory = os.path.join("data", "single", "1D")
+    directory = os.path.join("datasets", "single", "merged")
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    wandb.init(
+        project='FoundationOpt',
+        config=args
+    )
+
+    X, y = get_data(directory)
+    study = optuna.create_study(direction="minimize")
+    study.optimize(lambda trial: run_study(trial, X, y, args), n_trials=2, n_jobs=-1)
+
+    print("Best trial:")
+    trial = study.best_trial
+    print(f"\tValue: {trial.value}")
+    print("\tParams: ")
+    for key, value in trial.params.items():
+        print(f"    {key}: {value}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
