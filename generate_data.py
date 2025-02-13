@@ -16,7 +16,7 @@ if __name__=="__main__":
     gen_models = ["SimpleTrig", "SineCos", "MLP"]
     parser.add_argument(
         "--type",
-        default="SimpleTrig",
+        default="SineCos",
         choices=gen_models,
         help=f"Type of generator {gen_models} to be used to synthesize function. Default is 'SineCos'."
     )
