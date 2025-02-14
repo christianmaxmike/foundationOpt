@@ -32,6 +32,17 @@ def get_data(directory):
     X = np.concatenate(X, axis=0)
     y = np.concatenate(y, axis=0)
 
+    # Normalize X
+    X_min = X.min(axis=0)
+    X_max = X.max(axis=0)
+    X = (X - X_min) / (X_max - X_min + 1e-10)  # Adding a small constant to avoid division by zero
+
+    # Normalize y
+    y_min = y.min()
+    y_max = y.max()
+    y = (y - y_min) / (y_max - y_min + 1e-10)  # Adding a small constant to avoid division by zero
+
+
     return X, y
 
 
@@ -206,7 +217,7 @@ def main(args):
 
     X, y = get_data(directory)
     study = optuna.create_study(direction="minimize")
-    study.optimize(lambda trial: run_study(trial, X, y, args), n_trials=2, n_jobs=-1)
+    study.optimize(lambda trial: run_study(trial, X, y, args), n_trials=10, n_jobs=-1)
 
     print("Best trial:")
     trial = study.best_trial

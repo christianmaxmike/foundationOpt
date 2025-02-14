@@ -69,7 +69,6 @@ class SineGaussianBuilder:
             combined = self.combine_two_fncs(partial_y, pair_y, self.ops[op_idx])
             op_idx += 1
             partial_y = combined
-
         return partial_y
 
     def plot_fnc(self, ax):
@@ -79,7 +78,8 @@ class SineGaussianBuilder:
         x = np.linspace(domain_start, domain_end, domain_points)
         y = self.build_fnc(x) 
         ax.plot(x, y)
-        plt.show()
+        plt.savefig("test.png")
+        #plt.show()
 
 
 class RandomSineGaussianGenerator:
@@ -382,22 +382,3 @@ def generate(args):
                 os.path.join("datasets", "single", "1D_alt", f"data_{args.id}.npz"), 
                 os.path.join("datasets", "single", "1D_alt", f"models_{args.id}.dill")
     )
-
-""" 
-# ----------------- Example usage ------------------ #
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--id", default=0, type=int)
-    parser.add_argument("--batchSize", default=8192, type=int)
-    parser.add_argument("--sequenceLength", default=100, type=int)
-    parser.add_argument("--minComponents", default=2, type=int)
-    parser.add_argument("--maxComponents", default=8, type=int)
-    parser.add_argument("--minX", default=0, type=int)
-    parser.add_argument("--maxX", default=1, type=int)
-    parser.add_argument("--numHeboTrials", default=10, type=int)
-    parser.add_argument("--numHeboSteps", default=100, type=int)
-    args = parser.parse_args()
-    fnc_list = []
-
-    generate(args)
- """
