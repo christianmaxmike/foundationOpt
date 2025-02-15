@@ -3,17 +3,16 @@ import os
 
 import numpy as np
 import torch
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR, ExponentialLR
 from tqdm import tqdm
 import wandb
-
-from model.architecture import TabFound
-import os
 import optuna
 from optuna import Trial
+from datetime import datetime
+from model.architecture import TabFound
+
 
 os.environ['WANDB_INIT_TIMEOUT'] = '600'
-
 
 def load_batch(filename):
     f = np.load(filename)
@@ -42,7 +41,6 @@ def get_data(directory):
     y_max = y.max()
     y = (y - y_min) / (y_max - y_min + 1e-10)  # Adding a small constant to avoid division by zero
 
-
     return X, y
 
 
@@ -60,29 +58,39 @@ def split_data(X, y):
     X_test = np.concatenate([X_test, y_test], axis=2)
     X_val = np.concatenate([X_val, y_val], axis=2)
 
-
     return X_train, X_test, X_val, y_train, y_test, y_val
 
 
 def run_study(trial: Trial, X, y, args) -> float:
+    run = wandb.init(
+        project='FoundOpt',
+        config=args,
+        reinit=True
+    )
+    
+    #directory = os.path.join("datasets", "single", "merged")
+    #X, y = get_data(directory)  
+
     X_train, X_test, X_val, y_train, y_test, y_val = split_data(X, y)
 
-    lr = trial.suggest_categorical("learning_rate", [1e-3, 1e-4])
+    lr = trial.suggest_categorical("learning_rate", [1e-2, 1e-3, 1e-4])
     dropout_rate = trial.suggest_float("dropout_rate", 0.1, 0.5)
-    batch_size = trial.suggest_categorical("batch_size", [512, 1024, 2048])
-
-
+    batch_size = trial.suggest_categorical("batch_size", [256, 512, 1024, 2048])
+    nr_blocks = trial.suggest_int("nr_blocks", 4, 6)
+    embd_size = trial.suggest_categorical("embds_size", [32,64,128])
 
     input_features = X_train.shape[2]
     model = TabFound(
         input_features=input_features,
-        nr_blocks=args.nr_blocks,
+        mean_embedding_value=embd_size,
+        nr_blocks=nr_blocks,
         nr_heads=args.nr_heads,
         dropout=dropout_rate,
         nr_hyperparameters=input_features,
     )
 
-    wandb.watch(model)
+    run.watch(model)
+    
     nr_epochs = args.nr_epochs
     # batch_size = args.batch_size
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -103,20 +111,50 @@ def run_study(trial: Trial, X, y, args) -> float:
     # shuffle X_train indices
     indices = np.arange(X_train.shape[0])
 
-    total_iterations = int(X_train.shape[0] / batch_size) * nr_epochs
+    # Define the total number of iterations (steps) per epoch
+    iterations_per_epoch = int(X_train.shape[0] / batch_size)
 
-    def warmup(current_step: int):
-        return float(current_step / max(int(total_iterations / 10), 1))
+    # Define the warm-up duration in terms of steps (independent of epochs)
+    warmup_steps = 1000 # iterations_per_epoch * (0.05 * nr_epochs) # 5000  # Example: 1000 steps for warm-up
+    plateau_steps = 500 # iterations_per_epoch * (0.05 * nr_epochs) # 500  # Optional: Add a plateau phase after warm-up
 
-    scheduler1 = LambdaLR(optimizer, lr_lambda=warmup)
-    scheduler2 = CosineAnnealingLR(optimizer, T_max=total_iterations)
+    # Define the total number of iterations (steps) for the entire training
+    total_iterations = iterations_per_epoch * nr_epochs
+
+    # Warm-up function (independent of epochs)
+    def warmup_with_plateau(current_step: int):
+        if current_step < warmup_steps:
+            return float((current_step / warmup_steps) ** 2)  # Quadratic warm-up
+        elif current_step < warmup_steps + plateau_steps:
+            return 1.0  # Plateau phase
+        else:
+            return 0.0  # Transition to cosine annealing
+
+    # Schedulers
+    scheduler1 = LambdaLR(optimizer, lr_lambda=warmup_with_plateau)
+    scheduler2 = CosineAnnealingLR(optimizer, T_max=1000) # total_iterations - warmup_steps - plateau_steps)
+    scheduler3 = ExponentialLR(optimizer, gamma=0.9)
+    # Sequential scheduler
     scheduler = SequentialLR(
         optimizer,
         schedulers=[scheduler1, scheduler2],
-        milestones=[max(int(total_iterations / 10), 1)],
+        milestones=[warmup_steps + plateau_steps],
     )
 
-    patience = 5
+    #total_iterations = int(X_train.shape[0] / batch_size) * nr_epochs
+
+    #def warmup(current_step: int):
+    #    return float(current_step / max(int(total_iterations / 10), 1))
+
+    #scheduler1 = LambdaLR(optimizer, lr_lambda=warmup)
+    #scheduler2 = CosineAnnealingLR(optimizer, T_max=total_iterations)
+    #scheduler = SequentialLR(
+    #    optimizer,
+    #    schedulers=[scheduler1, scheduler2],
+    #    milestones=[max(int(total_iterations / 10), 1)],
+    #)
+
+    patience = 10
     best_val_loss = float("inf")
     epochs_no_improve = 0
 
@@ -132,7 +170,7 @@ def run_study(trial: Trial, X, y, args) -> float:
             optimizer.zero_grad(set_to_none=True)
             
             x_batch = X_train[j:j + batch_size, 0:-1, :]
-            y_batch = y_train[j:j + batch_size,:]
+            # y_batch = y_train[j:j + batch_size,:]
             y_target = X_train[j:j + batch_size, 1:, :]
             y_pred = model(x_batch)
             
@@ -140,7 +178,7 @@ def run_study(trial: Trial, X, y, args) -> float:
             loss.backward()
             optimizer.step()
             scheduler.step()
-            wandb.log({"Train Loss": loss.item(), 
+            run.log({"Train Loss": loss.item(), 
                        "Learning Rate": optimizer.param_groups[0]["lr"]})
             
         # Validation Loop
@@ -151,20 +189,24 @@ def run_study(trial: Trial, X, y, args) -> float:
                 if j + batch_size > X_val.shape[0]:
                     break
                 x_batch = X_val[j:j + batch_size, 0:-1, :]
-                y_batch = y_val[j:j + batch_size, :]
+                # y_batch = y_val[j:j + batch_size, :]
                 y_target = X_val[j:j + batch_size, 1:, :]
                 y_pred = model(x_batch)
                 loss = torch.nn.functional.mse_loss(y_pred, y_target)
                 val_loss += loss.item()
 
         val_loss /= (X_val.shape[0] / batch_size)
-        wandb.log({"Validation Loss": val_loss})
+        run.log({"Validation Loss": val_loss})
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             epochs_no_improve = 0
             # save the best model
-            torch.save(model.state_dict(), os.path.join(args.output_dir, "best_model.pt"))
+            formatted_datetime = datetime.now().strftime("%y%m%d")
+            fstring = f"{args.output_dir}/output_{formatted_datetime}_3/trial_{trial.number}/"
+            if not os.path.exists(fstring):
+                os.makedirs(fstring)
+                torch.save(model.state_dict(), os.path.join(fstring, "best_model.pt"))
         else:
             epochs_no_improve += 1
             print (f"Strike {epochs_no_improve} of {patience} @ epoch{i}/{nr_epochs}!")
@@ -188,7 +230,7 @@ def run_study(trial: Trial, X, y, args) -> float:
             y_target = X_test[j:j + batch_size, 1:, :]
             y_pred = model(x_batch)
             eval_loss += torch.nn.functional.mse_loss(y_pred, y_target)
-        wandb.log({"Test Loss": eval_loss.item()})
+        run.log({"Test Loss": eval_loss.item()})
         #X_test = torch.tensor(X_test, dtype=torch.float32)
         #X_test = X_test.to(dev)
         #input = X_test[:, 0:-1, :]
@@ -200,7 +242,7 @@ def run_study(trial: Trial, X, y, args) -> float:
 
     # save the model
     #torch.save(model.state_dict(), os.path.join(args.output_dir, "model.pt"))
-
+    run.finish()
     return eval_loss
 
 def main(args):
@@ -209,22 +251,20 @@ def main(args):
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-
-    wandb.init(
-        project='FoundationOpt',
-        config=args
-    )
-
+    
     X, y = get_data(directory)
     study = optuna.create_study(direction="minimize")
-    study.optimize(lambda trial: run_study(trial, X, y, args), n_trials=10, n_jobs=-1)
+    study.optimize(lambda trial: run_study(trial, X, y, args), n_trials=10, n_jobs=-1) # , callbacks=[wandbc])
+    #  study.optimize(run_study, n_trials=10, n_jobs=-1) # , callbacks=[wandbc])
 
     print("Best trial:")
     trial = study.best_trial
+    print(f"\tNumber: {study.best_trial.number}")
     print(f"\tValue: {trial.value}")
     print("\tParams: ")
     for key, value in trial.params.items():
         print(f"    {key}: {value}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -277,6 +317,6 @@ if __name__ == "__main__":
         default=0.2,
         help='The dropout rate.',
     )
-
+    #global args
     args = parser.parse_args()
     main(args)
