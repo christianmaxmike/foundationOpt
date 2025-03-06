@@ -38,8 +38,19 @@ class BarDistribution(nn.Module):
         if ignore_loss_mask.any():
             if not self.ignore_nan_targets: raise ValueError(f'Found NaN in target {y}')
             # print_once("A loss was ignored because there was nan target.")
-        y[ignore_loss_mask] = self.borders[0] # this is just a default value, it will be ignored anyway
+
+        y = y.long()
+        ignore_loss_mask = (y < 0) | (y >= self.num_bars)
+        y[ignore_loss_mask] = self.borders[0].long()
         return ignore_loss_mask
+
+    # def ignore_init(self, y):
+    #     ignore_loss_mask = torch.isnan(y)
+    #     if ignore_loss_mask.any():
+    #         if not self.ignore_nan_targets: raise ValueError(f'Found NaN in target {y}')
+    #         # print_once("A loss was ignored because there was nan target.")
+    #     y[ignore_loss_mask] = self.borders[0] # this is just a default value, it will be ignored anyway
+    #     return ignore_loss_mask
 
     def compute_scaled_log_probs(self, logits):
         # this is equivalent to log(p(y)) of the density p
@@ -57,7 +68,7 @@ class BarDistribution(nn.Module):
 
         # 1) Ensure y is cloned & contiguous, then reshape to match logits up to the last dimension
         y = y.clone().contiguous().view(*logits.shape[:-1])  # remove any trailing one-dimension
-
+    
         # 2) Identify positions to ignore (if you have an ignore_init method for certain time steps)
         ignore_loss_mask = self.ignore_init(y)
 
