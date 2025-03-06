@@ -138,6 +138,8 @@ class PFNTransformer(nn.Module):
         use_bar_distribution=False,
         bar_dist_smoothing=0.0,
         full_support=False,
+        ##########################################
+        transform_type="power",
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -151,8 +153,9 @@ class PFNTransformer(nn.Module):
         self.use_autoregression = use_autoregression
         self.nar_inference_flag = nar_inference_flag
 
+        lower_bound = -1.0 if transform_type == "power" else 0.0
         # Binning processor (for cross-entropy approach).
-        self.binner = BinningProcessor(num_bins=num_bins)
+        self.binner = BinningProcessor(num_bins=num_bins, min_val=lower_bound)
 
         # Input embedding
         self.input_embed = nn.Linear(input_dim, hidden_dim)
@@ -180,7 +183,7 @@ class PFNTransformer(nn.Module):
         self.use_bar_distribution = use_bar_distribution
         if self.use_bar_distribution:
             # Create the bin edges that match BinningProcessor
-            bar_borders = torch.linspace(0.0, 1.0, steps=num_bins+1)
+            bar_borders = torch.linspace(lower_bound * 4, 4.0, steps=num_bins+1)
             if full_support:
                 from model.bar_distribution import FullSupportBarDistribution
                 self.bar_distribution = FullSupportBarDistribution(

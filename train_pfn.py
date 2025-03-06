@@ -79,9 +79,6 @@ def load_and_preprocess_data(data_config, sequence_length=None, device=None):
         y = Y_2d.reshape(shape_y)
 
     elif transform_type == 'power':
-        # Example: Yeo-Johnson transform from scipy
-        # NOTE: you must ensure `scipy` is installed. Also, Yeo-Johnson can handle negative values.
-
         if yeojohnson is None:
             raise RuntimeError("scipy.stats not available. Install scipy or remove 'power' transform.")
 
@@ -145,6 +142,10 @@ def load_and_preprocess_data(data_config, sequence_length=None, device=None):
     y_train = torch.tensor(y_train, dtype=torch.float32, device=device)
     y_val   = torch.tensor(y_val,   dtype=torch.float32, device=device)
     y_test  = torch.tensor(y_test,  dtype=torch.float32, device=device)
+
+    print(f"After loading and preprocessing (min/max values):")
+    print(f"  X_train: {X_train.min().item():.4f} / {X_train.max().item():.4f}")
+    print(f"  y_train: {y_train.min().item():.4f} / {y_train.max().item():.4f}")
 
     # Return a dict with the same structure as the original .pkl approach
     return {
@@ -276,7 +277,8 @@ def main():
         use_autoregression=model_config.get('use_autoregression', False),
         use_bar_distribution=(loss_type == 'bar'),
         bar_dist_smoothing=model_config.get('bar_dist_smoothing', 0.0),
-        full_support=model_config.get('full_support', False)
+        full_support=model_config.get('full_support', False),
+        transform_type=data_config.get('transform_type', 'none')
     ).to(device)
 
     # ------------------------------------------------------------------
