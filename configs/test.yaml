@@ -1,0 +1,35 @@
+run_name: test
+
+wandb:
+  project: FoundOpt
+
+data:
+  # e.g. dataset paths if needed
+  dataset_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/data.pkl"
+
+model:
+  input_dim: !!int 2
+  hidden_dim: !!int 64
+  num_layers: !!int 2
+  num_heads: !!int 2
+  dropout: !!float 0.4
+  num_bins: !!int 64
+  use_positional_encoding: true
+  use_autoregressive: false
+
+optimizer:
+  lr: !!float 1e-4
+  weight_decay: !!float 1e-5
+  scheduler:
+    warmup_fraction: !!float 0.1
+    plateau_fraction: !!float 0.3
+
+training:
+  batch_size: !!int 256
+  epochs: !!int 50
+  ckpt_dir: "./checkpoints"
+  save_every: !!int 5
+
+losses:
+  exploration_weight: !!float 0.2
+  convergence_weight: !!float 0.2

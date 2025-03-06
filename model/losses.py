@@ -33,3 +33,31 @@ def convergence_loss_fn(x_batch: torch.Tensor, model):
     Could measure how close the predicted next step is to the best known so far, etc.
     """
     return 0.0
+
+
+def bar_distribution_loss(bar_dist_module, logits, targets):
+    """
+    logits: [B, T_out, D, num_bins]
+    targets: [B, T, D] or [B, T_out, D]
+    bar_dist_module expects [T_out, B, num_bins]
+    """
+    B, T_out, D, num_bins = logits.shape
+    # We must ensure the target has T_out time steps, not T.
+    # If your model is returning T-1 time steps in logits, slice:
+    if targets.shape[1] == T_out + 1:
+        # e.g. the original T was T_out+1
+        targets = targets[:, 1:, :]  # drop the first time step => now [B, T_out, D]
+
+    # Then do dimension-by-dimension, same as your snippet:
+    total_loss = 0
+    for dim_idx in range(D):
+        # [B, T_out, num_bins] -> permute -> [T_out, B, num_bins]
+        dim_logits = logits[:, :, dim_idx, :].permute(1, 0, 2)
+        # [B, T_out] -> permute -> [T_out, B]
+        dim_targets = targets[:, :, dim_idx].permute(1, 0)
+
+        dim_loss = bar_dist_module(dim_logits, dim_targets)
+        total_loss += dim_loss.mean()
+
+    return total_loss
+

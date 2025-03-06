@@ -4,8 +4,8 @@ import torch.nn as nn
 
 from torch.nn import functional as F
 
-from xformers.components.attention import LocalAttention
-from torchtune.modules import RotaryPositionalEmbeddings
+# from xformers.components.attention import LocalAttention
+# from torchtune.modules import RotaryPositionalEmbeddings
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -77,17 +77,17 @@ class MultiAttentionHead(nn.Module):
         self.resid_dropout = nn.Dropout(dropout)
         self.embedding_size = embedding_size
         self.n_head = num_heads
-        self.query_embedding = RotaryPositionalEmbeddings(int(embedding_size / num_heads))
-        self.key_embedding = RotaryPositionalEmbeddings(int(embedding_size / num_heads))
+        # self.query_embedding = RotaryPositionalEmbeddings(int(embedding_size / num_heads))
+        # self.key_embedding = RotaryPositionalEmbeddings(int(embedding_size / num_heads))
 
         self.sliding_attention = sliding_attention
 
-        if sliding_attention:
-            self.sliding_attn = LocalAttention(
-                window_size=99,
-                causal=self.casual,
-                dropout=dropout,
-        )
+        # if sliding_attention:
+        #     self.sliding_attn = LocalAttention(
+        #         window_size=99,
+        #         causal=self.casual,
+        #         dropout=dropout,
+        # )
 
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
@@ -103,8 +103,8 @@ class MultiAttentionHead(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head)
         v = v.view(B, T, self.n_head, C // self.n_head)
 
-        q = self.query_embedding(q)
-        k = self.key_embedding(k)
+        # q = self.query_embedding(q)
+        # k = self.key_embedding(k)
 
         k = k.transpose(1, 2)  # (B, nh, T, hs)
         q = q.transpose(1, 2)  # (B, nh, T, hs)
@@ -213,5 +213,8 @@ class TabFound(nn.Module):
 
         x = self.norm_f(x)
         matrix = self.ln_head(x)
+
+        # Apply sigmoid here to bound outputs in [0, 1]
+        matrix = torch.sigmoid(matrix)
 
         return matrix
