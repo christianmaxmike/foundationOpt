@@ -4,8 +4,9 @@ wandb:
   project: FoundOpt
 
 data:
-  # e.g. dataset paths if needed
-  dataset_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/data.pkl"
+  dataset_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/"
+  transform_type: "power"
+  models_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/models_0.dill"
 
 model:
   input_dim: !!int 2

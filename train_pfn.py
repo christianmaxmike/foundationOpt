@@ -6,6 +6,7 @@ import os
 import wandb
 import pickle
 import torch
+import numpy as np
 
 from torch.utils.data import DataLoader, TensorDataset, RandomSampler
 from torch.optim.lr_scheduler import (
@@ -13,7 +14,152 @@ from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
     SequentialLR
 )
+try:
+    from scipy.stats import yeojohnson
+except ImportError:
+    yeojohnson = None
 
+# ------------------------------------------------------------------
+# 1) Helper: load data, optionally from multiple .npz, apply transform, split
+# ------------------------------------------------------------------
+def load_and_preprocess_data(data_config, sequence_length=None, device=None):
+    """
+    data_config should have:
+      - data_source: "pkl" or "npz_directory"
+      - dataset_path: path to .pkl or directory with .npz
+      - transform_type: e.g. "none", "minmax", "power"
+      - train_ratio, val_ratio, test_ratio (optional) if you want to control splits
+    """
+    dataset_path = data_config['dataset_path']
+
+
+    # 1) Gather all .npz files
+    all_x = []
+    all_y = []
+    for file in os.listdir(dataset_path):
+        if file.endswith(".npz"):
+            filepath = os.path.join(dataset_path, file)
+            with np.load(filepath) as npz_file:
+                # Adjust keys as needed
+                part_x = npz_file["x"]  # or whatever your .npz stores
+                part_y = npz_file["y"]
+                all_x.append(part_x)
+                all_y.append(part_y)
+
+    # 2) Concatenate
+    X = np.concatenate(all_x, axis=0)  # e.g. [N, T, D]
+    y = np.concatenate(all_y, axis=0)  # e.g. [N, T2, ...] or [N, Ydim]
+
+    # 3) (Optional) If y has different shape, make sure it matches X’s time dimension
+    #   Adjust if your y is shape [N, T, 1], etc. For demonstration, assume y is [N, T, 1].
+    #   If y is just [N, 1], adapt accordingly.
+    #   For example, we can handle a shape mismatch carefully or leave as-is if consistent.
+
+    # 4) Transform if needed:
+    transform_type = data_config.get('transform_type', 'none')
+    if transform_type == 'minmax':
+        # a) Flatten along the first two dims for X => shape [N*T, D] if needed
+        shape_x = X.shape
+        X_2d = X.reshape(-1, shape_x[-1])  # [N*T, D]
+
+        x_min = X_2d.min(axis=0)
+        x_max = X_2d.max(axis=0)
+        # Avoid division by zero
+        denom = (x_max - x_min) + 1e-10
+        X_2d = (X_2d - x_min) / denom
+        X = X_2d.reshape(shape_x)
+
+        # b) Same for y (depending on shape)
+        shape_y = y.shape
+        Y_2d = y.reshape(-1, shape_y[-1])
+        y_min = Y_2d.min(axis=0)
+        y_max = Y_2d.max(axis=0)
+        denom_y = (y_max - y_min) + 1e-10
+        Y_2d = (Y_2d - y_min) / denom_y
+        y = Y_2d.reshape(shape_y)
+
+    elif transform_type == 'power':
+        # Example: Yeo-Johnson transform from scipy
+        # NOTE: you must ensure `scipy` is installed. Also, Yeo-Johnson can handle negative values.
+
+        if yeojohnson is None:
+            raise RuntimeError("scipy.stats not available. Install scipy or remove 'power' transform.")
+
+        shape_x = X.shape
+        X_2d = X.reshape(-1, shape_x[-1])  # [N*T, D]
+        for d in range(X_2d.shape[1]):
+            X_2d[:, d], _ = yeojohnson(X_2d[:, d])
+        X = X_2d.reshape(shape_x)
+
+        shape_y = y.shape
+        Y_2d = y.reshape(-1, shape_y[-1])
+        for d in range(Y_2d.shape[1]):
+            Y_2d[:, d], _ = yeojohnson(Y_2d[:, d])
+        y = Y_2d.reshape(shape_y)
+
+    # 5) Split into train/val/test
+    #    If your data is big, you might want e.g. 80%/10%/10%.
+    train_ratio = data_config.get('train_ratio', 0.8)
+    val_ratio   = data_config.get('val_ratio', 0.1)
+    test_ratio  = data_config.get('test_ratio', 0.1)
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-7, "Splits must sum to 1"
+
+    N = X.shape[0]
+    train_size = int(train_ratio * N)
+    val_size   = int(val_ratio * N)
+    test_size  = N - train_size - val_size
+
+    # Shuffle if you want random splits
+    indices = np.arange(N)
+    np.random.shuffle(indices)
+    X = X[indices]
+    y = y[indices]
+
+    X_train = X[:train_size]
+    y_train = y[:train_size]
+
+    X_val = X[train_size:train_size+val_size]
+    y_val = y[train_size:train_size+val_size]
+
+    X_test = X[train_size+val_size:]
+    y_test = y[train_size+val_size:]
+
+    # Optionally crop sequence length for training if requested
+    if sequence_length is not None:
+        # If X_... has shape [N, T, D], we cut T => X_...[:, :sequence_length]
+        X_train = X_train[:, :sequence_length]
+        X_val   = X_val[:, :sequence_length]
+        X_test  = X_test[:, :sequence_length]
+
+        # Similarly y_..., if it also has a T dimension
+        # If y has shape [N, T, Ydim], do the same:
+        if X_train.ndim == y_train.ndim:
+            y_train = y_train[:, :sequence_length]
+            y_val   = y_val[:, :sequence_length]
+            y_test  = y_test[:, :sequence_length]
+
+    # Convert to torch Tensors
+    X_train = torch.tensor(X_train, dtype=torch.float32, device=device)
+    X_val   = torch.tensor(X_val,   dtype=torch.float32, device=device)
+    X_test  = torch.tensor(X_test,  dtype=torch.float32, device=device)
+    y_train = torch.tensor(y_train, dtype=torch.float32, device=device)
+    y_val   = torch.tensor(y_val,   dtype=torch.float32, device=device)
+    y_test  = torch.tensor(y_test,  dtype=torch.float32, device=device)
+
+    # Return a dict with the same structure as the original .pkl approach
+    return {
+        "X_train": X_train,
+        "X_val":   X_val,
+        "X_test":  X_test,
+        "y_train": y_train,
+        "y_val":   y_val,
+        "y_test":  y_test,
+    }
+
+
+# ------------------------------------------------------------------
+# 2) Import your custom PFNTransformer & losses
+# ------------------------------------------------------------------
 from model.pfn_transformer import PFNTransformer
 from model.losses import (
     exploration_loss_fn,
@@ -21,6 +167,7 @@ from model.losses import (
     cross_entropy_binning_loss,
     bar_distribution_loss
 )
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train PFN Transformer for Learned Optimization")
@@ -44,6 +191,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
     # ------------------------------------------------------------------
     # 1) Load YAML Config
@@ -69,30 +218,34 @@ def main():
     )
 
     # ------------------------------------------------------------------
-    # 3) Data Loading & Preparation
+    # 3) Data Loading & Preprocessing
     # ------------------------------------------------------------------
     data_config = config['data']
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    with open(data_config['dataset_path'], 'rb') as f:
-        data = pickle.load(f)
+    data_dict = load_and_preprocess_data(
+        data_config=data_config,
+        sequence_length=args.sequence_length,
+        device=device
+    )
+    X_train = data_dict['X_train']  # shape [N, T, D]
+    X_val   = data_dict['X_val']
+    X_test  = data_dict['X_test']
+    y_train = data_dict['y_train']
+    y_val   = data_dict['y_val']
+    y_test  = data_dict['y_test']
 
-    X_train = torch.tensor(data['X_train'], dtype=torch.float32).to(device)
-    if args.sequence_length is not None:
-        X_train = X_train[:, :args.sequence_length]
-    X_val   = torch.tensor(data['X_val'],   dtype=torch.float32).to(device)
-    X_test  = torch.tensor(data['X_test'],  dtype=torch.float32).to(device)
+    # Combine X & y on last dimension => if X is [N, T, D], y is [N, T, 1] or [N, T], etc.
+    # or if y is just [N, T], unsqueeze last dim to match
+    if y_train.ndim == 2 and X_train.ndim == 3:
+        # e.g. [N, T] => [N, T, 1]
+        y_train = y_train.unsqueeze(-1)
+        y_val   = y_val.unsqueeze(-1)
+        y_test  = y_test.unsqueeze(-1)
 
-    y_train = torch.tensor(data['y_train'], dtype=torch.float32).to(device)
-    if args.sequence_length is not None:
-        y_train = y_train[:, :args.sequence_length]
-    y_val   = torch.tensor(data['y_val'],   dtype=torch.float32).to(device)
-    y_test  = torch.tensor(data['y_test'],  dtype=torch.float32).to(device)
-
-    # Example: we combine X and y along the last dim => shape [N, T, 4] if X,y each had 2 dims
-    X_train_model = torch.cat([X_train, y_train], dim=-1)
-    X_val_model   = torch.cat([X_val,   y_val  ], dim=-1)
-    X_test_model  = torch.cat([X_test,  y_test ], dim=-1)
+    X_train_model = torch.cat([X_train, y_train], dim=-1)  # => shape [N, T, D + Ydim]
+    X_val_model   = torch.cat([X_val,   y_val],   dim=-1)
+    X_test_model  = torch.cat([X_test,  y_test],  dim=-1)
 
     # Build train & val sets
     train_dataset = TensorDataset(X_train_model)
@@ -138,8 +291,8 @@ def main():
     total_steps = epochs * len(train_dataloader)
 
     sched_cfg = optim_config.get('scheduler', {})
-    warmup_steps   = sched_cfg.get('warmup_fraction', 0.1) * total_steps
-    plateau_steps  = sched_cfg.get('plateau_fraction', 0.0) * total_steps
+    warmup_steps   = int(sched_cfg.get('warmup_fraction', 0.1) * total_steps)
+    plateau_steps  = int(sched_cfg.get('plateau_fraction', 0.0) * total_steps)
     # Additional steps for Cosine
     remaining_steps = max(1, total_steps - (warmup_steps + plateau_steps))
     print(f"Total steps: {total_steps}, warmup={warmup_steps}, plateau={plateau_steps}, remaining={remaining_steps}")
@@ -176,21 +329,19 @@ def main():
         total_loss = 0.0
 
         for batch in train_dataloader:
-            x_batch = batch[0]  # shape [B, T, something], e.g. [B, T, 4]
+            x_batch = batch[0]  # shape [B, T, something]
             optimizer.zero_grad()
 
             # forward_with_binning => returns (logits, target_bins)
             logits, target_bins = model.forward_with_binning(x_batch)
 
             if loss_type == "bar":
-                # We'll interpret x_batch[..., model.input_dim:] as y-values
-                # or, if x_batch is just [B,T,2], you can directly pass that to bar_dist.
-                # Make sure shapes align with the model's assumption => [B,T,2].
-                # The same `logits` is [B,T,2,num_bins].
-                # We only need the original continuous values in [0,1] that we want to fit.
-                target_values = x_batch[..., -2:]  # e.g. last 2 dims
+                # e.g. if final 2 dims in x_batch are the "targets"
+                # or adapt as needed if you have (D+1) in the last dimension
+                target_dim = model.input_dim  # e.g. 2 or (D+1)
+                target_values = x_batch[..., -target_dim:]  
                 bar_loss = bar_distribution_loss(
-                    model.bar_distribution,   # The module created inside PFNTransformer
+                    model.bar_distribution,
                     logits,
                     target_values
                 )
@@ -204,7 +355,7 @@ def main():
             exploration_weight = config['losses'].get('exploration_weight', 0.1) if args.exploration_loss else 0.0
             convergence_weight = config['losses'].get('convergence_weight', 0.1) if args.convergence_loss else 0.0
             exploration_term = exploration_loss_fn(x_batch, model) * exploration_weight
-            convergence_term  = convergence_loss_fn(x_batch,  model) * convergence_weight
+            convergence_term  = convergence_loss_fn(x_batch, model) * convergence_weight
 
             loss = main_loss + exploration_term + convergence_term
             loss.backward()
@@ -229,9 +380,11 @@ def main():
             for batch in val_dataloader:
                 x_batch = batch[0]
                 logits, target_bins = model.forward_with_binning(x_batch)
+
                 if loss_type == "bar":
-                    target_values = x_batch[..., -2:]  # same logic as above
-                    val_loss += bar_distribution_loss(  
+                    target_dim = model.input_dim
+                    target_values = x_batch[..., -target_dim:]
+                    val_loss += bar_distribution_loss(
                         model.bar_distribution,
                         logits,
                         target_values

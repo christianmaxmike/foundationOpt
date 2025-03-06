@@ -1,8 +1,16 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from typing import Optional, Tuple
+
+def _get_activation_fn(activation: str):
+    if activation == "relu":
+        return F.relu
+    elif activation == "gelu":
+        return F.gelu
+    else:
+        raise RuntimeError(f"activation should be 'relu' or 'gelu', not {activation}")
+
 
 class BinningProcessor(nn.Module):
     """
@@ -19,45 +27,17 @@ class BinningProcessor(nn.Module):
         self.register_buffer("boundaries", boundaries)
 
     def bin_values(self, values: torch.Tensor) -> torch.Tensor:
+        # values: [..., output_dim], all within [min_val, max_val] (or clipped)
         clipped = torch.clamp(values, self.min_val, self.max_val)
         indices = torch.bucketize(clipped, self.boundaries)
         return indices
 
     def unbin_values(self, indices: torch.Tensor) -> torch.Tensor:
+        # indices: [..., output_dim], integer bin indices
         bin_width = (self.max_val - self.min_val) / self.num_bins
         centers = self.min_val + (indices.float() + 0.5) * bin_width
         return centers
 
-
-# class TransformerBlock(nn.Module):
-#     """Basic transformer block with multi-head attention + feed-forward."""
-#     def __init__(self, hidden_dim, num_heads, dropout):
-#         super().__init__()
-#         self.attn = nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout, batch_first=True)
-#         self.ff = nn.Sequential(
-#             nn.Linear(hidden_dim, 4*hidden_dim),
-#             nn.ReLU(),
-#             nn.Linear(4*hidden_dim, hidden_dim),
-#             nn.Dropout(dropout)
-#         )
-#         self.norm1 = nn.LayerNorm(hidden_dim)
-#         self.norm2 = nn.LayerNorm(hidden_dim)
-
-#     def forward(self, x, attn_mask=None):
-#         attn_out, _ = self.attn(x, x, x, attn_mask=attn_mask)
-#         x = self.norm1(x + attn_out)
-#         ff_out = self.ff(x)
-#         x = self.norm2(x + ff_out)
-#         return x
-
-
-def _get_activation_fn(activation: str):
-    if activation == "relu":
-        return F.relu
-    elif activation == "gelu":
-        return F.gelu
-    else:
-        raise RuntimeError(f"activation should be 'relu' or 'gelu', not {activation}")
 
 class TransformerBlock(nn.Module):
     """
@@ -70,28 +50,15 @@ class TransformerBlock(nn.Module):
         num_heads: int,
         dim_feedforward: int = 128,
         dropout: float = 0.1,
-        activation: str = "sigmoid",
+        activation: str = "relu",
         layer_norm_eps: float = 1e-5,
         batch_first: bool = True,
         pre_norm: bool = True,
         device=None,
         dtype=None,
     ):
-        """
-        Args:
-            d_model: the hidden size (model dimension).
-            nhead: number of attention heads.
-            dim_feedforward: dimension of the feedforward network.
-            dropout: dropout probability.
-            activation: activation function ("relu" or "gelu").
-            layer_norm_eps: epsilon for layernorm.
-            batch_first: if True, the input/output shape is (B, T, D).
-            pre_norm: if True, apply layer normalization before attention and FF.
-            device, dtype: passed to layer constructors for parameter initialization.
-        """
-        factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
-
+        factory_kwargs = {'device': device, 'dtype': dtype}
         self.self_attn = nn.MultiheadAttention(
             hidden_dim,
             num_heads,
@@ -109,8 +76,6 @@ class TransformerBlock(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
 
         self.pre_norm = pre_norm
-
-        # Activation function
         self.activation = _get_activation_fn(activation)
 
     def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
@@ -119,23 +84,18 @@ class TransformerBlock(nn.Module):
         """
         if self.pre_norm:
             # --- Pre-Norm Variant ---
-            # 1) Norm -> Self-Attn -> Residual
             x_norm = self.norm1(x)
-            # recompute_attn is a no-op placeholder in this snippet
             attn_out, _ = self.self_attn(x_norm, x_norm, x_norm, attn_mask=attn_mask)
             x = x + self.dropout1(attn_out)
 
-            # 2) Norm -> FF -> Residual
             x_norm = self.norm2(x)
             ff_out = self.linear2(self.dropout(self.activation(self.linear1(x_norm))))
             x = x + self.dropout2(ff_out)
         else:
             # --- Post-Norm (classic) ---
-            # 1) Self-Attn -> Dropout -> Residual -> Norm
             attn_out, _ = self.self_attn(x, x, x, attn_mask=attn_mask)
             x = self.norm1(x + self.dropout1(attn_out))
 
-            # 2) FF -> Dropout -> Residual -> Norm
             ff_out = self.linear2(self.dropout(self.activation(self.linear1(x))))
             x = self.norm2(x + self.dropout2(ff_out))
 
@@ -145,18 +105,19 @@ class TransformerBlock(nn.Module):
 class PFNTransformer(nn.Module):
     """
     Transformer-based trajectory prediction model with AR & NAR training.
-    Predicts next-step x, y using discrete binning.
+    Predicts next-step values (x plus y) using discrete binning.
 
-    Features:
-    - Autoregressive mode (AR) for iterative predictions (training).
-    - Non-autoregressive mode (NAR) for fast parallel prediction (inference).
-    - Forecast multiple steps (NAR).
-    - Supports optional positional encoding.
+    Key changes from the original version:
+    - Added `output_dim`: how many dimensions we want to predict (D+1).
+    - The final projection produces `output_dim * num_bins`.
+    - The final logits have shape [B, T_out, output_dim, num_bins].
+    - The targets have shape [B, T_out, output_dim].
     """
     def __init__(
         self,
         ##########################################
-        input_dim=2,
+        input_dim=2,        # Dimension of each input token (e.g., x + y).
+        output_dim=2,       # Number of dimensions we predict => D+1 heads.
         hidden_dim=64,
         num_layers=2,
         num_heads=2,
@@ -180,6 +141,7 @@ class PFNTransformer(nn.Module):
     ):
         super().__init__()
         self.input_dim = input_dim
+        self.output_dim = output_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.num_heads = num_heads
@@ -211,17 +173,13 @@ class PFNTransformer(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # Output projection => shape = [B, T, input_dim * num_bins]
-        self.out_proj = nn.Linear(hidden_dim, input_dim * num_bins)
+        # Output projection => shape = [B, T, output_dim * num_bins]
+        self.out_proj = nn.Linear(hidden_dim, output_dim * num_bins)
 
-        # -------------------------
-        # (A) Optionally build BarDistribution
-        # -------------------------
+        # Optionally build a BarDistribution-based module
         self.use_bar_distribution = use_bar_distribution
         if self.use_bar_distribution:
             # Create the bin edges that match BinningProcessor
-            # e.g. [0.0, 1.0] splitted into num_bins
-            # We'll pass them to BarDistribution (or FullSupportBarDistribution)
             bar_borders = torch.linspace(0.0, 1.0, steps=num_bins+1)
             if full_support:
                 from model.bar_distribution import FullSupportBarDistribution
@@ -242,14 +200,17 @@ class PFNTransformer(nn.Module):
 
     def forward_with_binning(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        seq: [B, T, 2] in [0,1].
+        seq: [B, T, input_dim].
+          For example, if input_dim=4, it might be 2D x + 2D y, or D x + 1D y, etc.
+          Values are assumed to be in [0,1] if using direct binning, or suitably normalized.
+
         Returns:
-          logits: [B, T_out, 2, num_bins]
-          target_bins: [B, T_out, 2]
+          logits: [B, T_out, output_dim, num_bins]
+          target_bins: [B, T_out, output_dim]
         Where T_out depends on forecast_steps & AR/NAR mode.
         """
         # If AR is used for training or we haven't enabled the NAR inference flag,
-        # we do step-by-step. Otherwise, do NAR in one go.
+        # do step-by-step. Otherwise, do NAR in one go.
         if self.use_autoregression:
             if self.training or not self.nar_inference_flag:
                 return self._forward_ar(seq)
@@ -262,54 +223,69 @@ class PFNTransformer(nn.Module):
     def _forward_nar(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Non-autoregressive forward pass (predict entire sequence in parallel).
+        We'll do "teacher forcing" for T-1 steps to predict T-1 future steps.
         """
         B, T, _ = seq.shape
-        # Use teacher forcing: embed the input sequence (except last step)
-        tokens = seq[:, :-1, :]  # [B, T-1, 2]
-        x_embed = self.embed_tokens(tokens)
 
+        # 1) Embed the input sequence (except the last item)
+        tokens = seq[:, :-1, :]  # [B, T-1, input_dim]
+        x_embed = self.embed_tokens(tokens)
         for block in self.blocks:
             x_embed = block(x_embed)
 
-        logits_2d = self.out_proj(x_embed)  # [B, T-1, 2*num_bins]
-        logits = logits_2d.view(B, T-1, 2, self.num_bins)
+        # 2) Produce logits => shape [B, T-1, output_dim, num_bins]
+        logits_2d = self.out_proj(x_embed)  # [B, T-1, output_dim * num_bins]
+        logits = logits_2d.view(B, T-1, self.output_dim, self.num_bins)
 
-        # Target bins are the next-step values
-        next_values = seq[:, 1:, :]
-        target_bins = self.binner.bin_values(next_values)
+        # 3) Target bins are the next-step ground truth for each output dimension
+        next_values = seq[:, 1:, :self.output_dim]  # [B, T-1, output_dim]
+        target_bins = self.binner.bin_values(next_values)  # same shape [B, T-1, output_dim]
 
         return logits, target_bins
 
     def _forward_ar(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Autoregressive forward pass (step-by-step).
+        We'll iterate from t_idx=0..(T-2), each time:
+          - Embed partial_seq up to t_idx
+          - Predict the next item
+          - Collect logits & target bins
         """
         B, T, _ = seq.shape
         all_logits, all_targets = [], []
 
         for t_idx in range(T - 1):
-            partial_seq = seq[:, :t_idx + 1, :]
+            # 1) Embed partial sequence up to t_idx
+            partial_seq = seq[:, :t_idx + 1, :]  # [B, t_idx+1, input_dim]
             x_embed = self.embed_tokens(partial_seq)
-
             for block in self.blocks:
                 x_embed = block(x_embed)
 
-            last_h = x_embed[:, -1, :]  # [B, hidden_dim]
-            logits_2d = self.out_proj(last_h).view(B, 2, self.num_bins)
-            all_logits.append(logits_2d.unsqueeze(1))
+            # 2) Take the last hidden state => project => shape [B, output_dim, num_bins]
+            last_h = x_embed[:, -1, :]      # [B, hidden_dim]
+            logits_2d = self.out_proj(last_h).view(B, self.output_dim, self.num_bins)
 
-            # Bin next step
-            target_bins = self.binner.bin_values(seq[:, t_idx + 1, :])
-            all_targets.append(target_bins.unsqueeze(1))
+            # 3) Bin the *next* step (t_idx+1)
+            target_vals = seq[:, t_idx + 1, :self.output_dim]  # [B, output_dim]
+            target_bins = self.binner.bin_values(target_vals)  # [B, output_dim]
 
-        logits = torch.cat(all_logits, dim=1)      # [B, T-1, 2, num_bins]
-        target_bins = torch.cat(all_targets, dim=1)  # [B, T-1, 2]
+            # 4) Collect
+            all_logits.append(logits_2d.unsqueeze(1))    # => [B,1,output_dim,num_bins]
+            all_targets.append(target_bins.unsqueeze(1)) # => [B,1,output_dim]
+
+        # Concatenate along time dimension
+        logits = torch.cat(all_logits, dim=1)        # [B, (T-1), output_dim, num_bins]
+        target_bins = torch.cat(all_targets, dim=1)  # [B, (T-1), output_dim]
         return logits, target_bins
 
     def embed_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        """
+        tokens: [B, T, input_dim]
+        Returns: [B, T, hidden_dim], possibly with added positional encoding.
+        """
         B, T, _ = tokens.shape
         x = self.input_embed(tokens)
         if self.pos_embed is not None:
             positions = torch.arange(T, device=tokens.device).unsqueeze(0)
-            x += self.pos_embed(positions)
+            x += self.pos_embed(positions)  # Broadcasting over B
         return x

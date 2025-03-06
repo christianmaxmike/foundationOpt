@@ -47,27 +47,54 @@ class BarDistribution(nn.Module):
         scaled_bucket_log_probs = bucket_log_probs - torch.log(self.bucket_widths)
         return scaled_bucket_log_probs
 
-    def forward(self, logits, y, mean_prediction_logits=None): # gives the negative log density (the _loss_), y: T x B, logits: T x B x self.num_bars
-        y = y.clone().view(*logits.shape[:-1]) # no trailing one dimension
+    def forward(self, logits, y, mean_prediction_logits=None):
+        """
+        Computes the negative log-density (loss). 
+        - y: [T, B] (or some shape compatible with logits.shape[:-1])
+        - logits: [T, B, self.num_bars]
+        The function returns a loss tensor of shape [T, B].
+        """
+
+        # 1) Ensure y is cloned & contiguous, then reshape to match logits up to the last dimension
+        y = y.clone().contiguous().view(*logits.shape[:-1])  # remove any trailing one-dimension
+
+        # 2) Identify positions to ignore (if you have an ignore_init method for certain time steps)
         ignore_loss_mask = self.ignore_init(y)
+
+        # 3) Convert continuous y-values to bucket indices (internally uses torch.searchsorted)
         target_sample = self.map_to_bucket_idx(y)
-        assert (target_sample >= 0).all() and (target_sample < self.num_bars).all(), f'y {y} not in support set for borders (min_y, max_y) {self.borders}'
-        assert logits.shape[-1] == self.num_bars, f'{logits.shape[-1]} vs {self.num_bars}'
 
+        # 4) Check that all targets are within the valid bin range
+        assert (target_sample >= 0).all() and (target_sample < self.num_bars).all(), (
+            f"y {y} not in support set for borders (min_y, max_y) {self.borders}"
+        )
+        assert logits.shape[-1] == self.num_bars, f"{logits.shape[-1]} vs {self.num_bars}"
+
+        # 5) Compute scaled log-probs for each bucket
         scaled_bucket_log_probs = self.compute_scaled_log_probs(logits)
-        nll_loss = -scaled_bucket_log_probs.gather(-1,target_sample[..., None]).squeeze(-1) # T x B
 
+        # 6) Negative log-likelihood for the correct bucket at each time-step/sample
+        #    => shape [T, B]
+        nll_loss = -scaled_bucket_log_probs.gather(-1, target_sample[..., None]).squeeze(-1)
+
+        # 7) Optional mean_prediction_logits term (non-myopic BO extension)
         if mean_prediction_logits is not None:
             if not self.training:
-                print('Calculating loss incl mean prediction loss for nonmyopic BO.')
+                print('Calculating loss incl. mean prediction loss for nonmyopic BO.')
             scaled_mean_log_probs = self.compute_scaled_log_probs(mean_prediction_logits)
-            nll_loss = torch.cat((nll_loss, self.mean_loss(logits, scaled_mean_log_probs)), 0)
+            # e.g. combine the mean-prediction loss with the NLL
+            nll_loss = torch.cat((nll_loss, self.mean_loss(logits, scaled_mean_log_probs)), dim=0)
 
-        smooth_loss = -scaled_bucket_log_probs.mean(dim=-1)
-        smoothing = self.smoothing if self.training else 0.
-        loss = (1. - smoothing) * nll_loss + smoothing * smooth_loss
-        loss[ignore_loss_mask] = 0.
+        # 8) Label smoothing
+        smooth_loss = -scaled_bucket_log_probs.mean(dim=-1)         # average negative log-prob
+        smoothing = self.smoothing if self.training else 0.0
+        loss = (1.0 - smoothing) * nll_loss + smoothing * smooth_loss
+
+        # 9) Zero out the loss for ignored steps
+        loss[ignore_loss_mask] = 0.0
+
         return loss
+
 
     def mean_loss(self, logits, scaled_mean_logits):
         assert (len(logits.shape) == 3) and (len(scaled_mean_logits.shape) == 2), \

@@ -1,11 +1,11 @@
-run_name: bar_full
+run_name: test
 
 wandb:
   project: FoundOpt
 
 data:
   dataset_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/"
-  transform_type: "power"
+  transform_type: "minmax"
   models_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/models_0.dill"
 
 model:
@@ -19,7 +19,7 @@ model:
   use_autoregressive: true
   loss_type: bar
   bar_dist_smoothing: !!float 0.0
-  full_support: true
+  full_support: false
 
 optimizer:
   lr: !!float 1e-4
