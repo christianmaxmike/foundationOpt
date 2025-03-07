@@ -1,19 +1,30 @@
 #!/bin/bash -l
-#SBATCH --nodes=1
+##SBATCH --nodes=1
 #SBATCH --partition=singlenode
-#SBATCH --job-name=generation
-#SBATCH --time=15:00:00
+##SBATCH --gres=gpu:a100:1
+##SBATCH --partition=a100
+##SBATCH --gres=gpu:h100:1
+##SBATCH --partition=h100
+#SBATCH --job-name=foundOpt
+#SBATCH --time=23:59:00
 #SBATCH --export=NONE
-#SBATCH --output=out_gen3d.txt
+#SBATCH --output=out.txt
 
 unset SLURM_EXPORT_ENV
 module load python
 
-venv gen
-source gen/bin/activate
+#export http_proxy=http://proxy:80
+#export https_proxy=http://proxy:80
+#export HTTP_PROXY=http://proxy:80
+#export HTTPS_PROXY=http://proxy:80
+export http_proxy=http://proxy.rrze.uni-erlangen.de:80
+export https_proxy=http://proxy.rrze.uni-erlangen.de:80
+export HTTP_PROXY=http://proxy.rrze.uni-erlangen.de:80
+export HTTPS_PROXY=http://proxy.rrze.uni-erlangen.de:80
 
-pip install python==3.12.7
-pip install dill
-pip install hebo
+source $HOME/venvs/foundOpt/bin/activate
 
-python generation_trigonometric.py multi_$1
+#python generation.py --id $1
+#python SineCosGenerator.py --id $1
+python generate_data.py --type "SimpleTrig" --id $1 --minComponents 1 --maxComponents 2
+#python train_model_main.py 
