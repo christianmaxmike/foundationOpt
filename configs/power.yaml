@@ -9,7 +9,8 @@ data:
   models_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/models_0.dill"
 
 model:
-  input_dim: !!int 2
+  x_dim: !!int 1
+  y_dim: !!int 1
   hidden_dim: !!int 64
   num_layers: !!int 4
   num_heads: !!int 1

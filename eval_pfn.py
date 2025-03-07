@@ -95,7 +95,7 @@ def main():
     loss_type = model_config.get('loss_type', 'cross_entropy')
     model = PFNTransformer(
         # Note: our PFNTransformer uses separate x_dim and y_dim.
-        x_dim=model_config.get('input_dim', 1),
+        x_dim=model_config.get('x_dim', 1),
         y_dim=model_config.get('y_dim', 1),
         hidden_dim=model_config.get('hidden_dim', 64),
         num_layers=model_config.get('num_layers', 2),
