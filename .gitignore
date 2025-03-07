@@ -176,3 +176,6 @@ output*/
 *.npz
 *.dill
 *.txt
+datasets/
+*.png
+/wandb
