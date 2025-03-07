@@ -10,7 +10,7 @@ import optuna
 from optuna import Trial
 from datetime import datetime
 from model.architecture import TabFound
-
+from datetime import datetime
 
 os.environ['WANDB_INIT_TIMEOUT'] = '600'
 
@@ -28,20 +28,34 @@ def get_data(directory):
             X.append(part_x)
             y.append(part_y)
 
+    bins = torch.linspace(0, 1.0, 32)
     X = np.concatenate(X, axis=0)
+    X = torch.tensor(X)
     y = np.concatenate(y, axis=0)
+    y = torch.tensor(y)
+
+    bin_indices = torch.bucketize(X, bins) - 1
+    bin_centers = (bins[:-1] + bins[1:]) / 2  # Compute bin centers
+    discretized_tensor_x = bin_centers[bin_indices]
+    X = discretized_tensor_x
+
+    bin_indices = torch.bucketize(y, bins) - 1
+    bin_centers = (bins[:-1] + bins[1:]) / 2  # Compute bin centers
+    discretized_tensor_y = bin_centers[bin_indices]
+    y = discretized_tensor_y
+
 
     # Normalize X
-    X_min = X.min(axis=0)
-    X_max = X.max(axis=0)
-    X = (X - X_min) / (X_max - X_min + 1e-10)  # Adding a small constant to avoid division by zero
+    #X_min = X.min(axis=0)
+    #X_max = X.max(axis=0)
+    #X = (X - X_min) / (X_max - X_min + 1e-10)  # Adding a small constant to avoid division by zero
 
     # Normalize y
-    y_min = y.min()
-    y_max = y.max()
-    y = (y - y_min) / (y_max - y_min + 1e-10)  # Adding a small constant to avoid division by zero
+    #y_min = y.min()
+    #y_max = y.max()
+    #y = (y - y_min) / (y_max - y_min + 1e-10)  # Adding a small constant to avoid division by zero
 
-    return X, y
+    return X, y 
 
 
 def split_data(X, y):
@@ -62,21 +76,19 @@ def split_data(X, y):
 
 
 def run_study(trial: Trial, X, y, args) -> float:
+    formatted_datetime = datetime.now().strftime("%y%m%d")
     run = wandb.init(
         project='FoundOpt',
         config=args,
         reinit=True
     )
     
-    #directory = os.path.join("datasets", "single", "merged")
-    #X, y = get_data(directory)  
-
     X_train, X_test, X_val, y_train, y_test, y_val = split_data(X, y)
 
     lr = trial.suggest_categorical("learning_rate", [1e-2, 1e-3, 1e-4])
-    dropout_rate = trial.suggest_float("dropout_rate", 0.1, 0.5)
+    dropout_rate = trial.suggest_float("dropout_rate", 0, 0.1)
     batch_size = trial.suggest_categorical("batch_size", [256, 512, 1024, 2048])
-    nr_blocks = trial.suggest_int("nr_blocks", 4, 6)
+    nr_blocks = trial.suggest_int("nr_blocks", 4, 8)
     embd_size = trial.suggest_categorical("embds_size", [32,64,128])
 
     input_features = X_train.shape[2]
@@ -115,11 +127,11 @@ def run_study(trial: Trial, X, y, args) -> float:
     iterations_per_epoch = int(X_train.shape[0] / batch_size)
 
     # Define the warm-up duration in terms of steps (independent of epochs)
-    warmup_steps = 1000 # iterations_per_epoch * (0.05 * nr_epochs) # 5000  # Example: 1000 steps for warm-up
-    plateau_steps = 500 # iterations_per_epoch * (0.05 * nr_epochs) # 500  # Optional: Add a plateau phase after warm-up
+    warmup_steps = 2000 # iterations_per_epoch * (0.05 * nr_epochs) # 5000  # Example: 1000 steps for warm-up
+    plateau_steps = 1000 # iterations_per_epoch * (0.05 * nr_epochs) # 500  # Optional: Add a plateau phase after warm-up
 
     # Define the total number of iterations (steps) for the entire training
-    total_iterations = iterations_per_epoch * nr_epochs
+    # total_iterations = iterations_per_epoch * nr_epochs
 
     # Warm-up function (independent of epochs)
     def warmup_with_plateau(current_step: int):
@@ -133,7 +145,7 @@ def run_study(trial: Trial, X, y, args) -> float:
     # Schedulers
     scheduler1 = LambdaLR(optimizer, lr_lambda=warmup_with_plateau)
     scheduler2 = CosineAnnealingLR(optimizer, T_max=1000) # total_iterations - warmup_steps - plateau_steps)
-    scheduler3 = ExponentialLR(optimizer, gamma=0.9)
+    scheduler3 = ExponentialLR(optimizer, gamma=0.7)
     # Sequential scheduler
     scheduler = SequentialLR(
         optimizer,
@@ -160,7 +172,7 @@ def run_study(trial: Trial, X, y, args) -> float:
 
     for i in tqdm(range(0, nr_epochs), desc="Epochs"):
         np.random.shuffle(indices)
-        X_train = X_train[indices, :, :]
+        X_train = X_train[indices, :25, :]
 
         # Training loop
         model.train()
@@ -203,7 +215,7 @@ def run_study(trial: Trial, X, y, args) -> float:
             epochs_no_improve = 0
             # save the best model
             formatted_datetime = datetime.now().strftime("%y%m%d")
-            fstring = f"{args.output_dir}/output_{formatted_datetime}_3/trial_{trial.number}/"
+            fstring = f"{args.output_dir}/output_{formatted_datetime}/trial_{trial.number}/"
             if not os.path.exists(fstring):
                 os.makedirs(fstring)
                 torch.save(model.state_dict(), os.path.join(fstring, "best_model.pt"))
@@ -242,6 +254,7 @@ def run_study(trial: Trial, X, y, args) -> float:
 
     # save the model
     #torch.save(model.state_dict(), os.path.join(args.output_dir, "model.pt"))
+    run.unwatch()
     run.finish()
     return eval_loss
 
@@ -254,7 +267,7 @@ def main(args):
     
     X, y = get_data(directory)
     study = optuna.create_study(direction="minimize")
-    study.optimize(lambda trial: run_study(trial, X, y, args), n_trials=10, n_jobs=-1) # , callbacks=[wandbc])
+    study.optimize(lambda trial: run_study(trial, X, y, args), n_trials=5, n_jobs=-1) # , callbacks=[wandbc])
     #  study.optimize(run_study, n_trials=10, n_jobs=-1) # , callbacks=[wandbc])
 
     print("Best trial:")

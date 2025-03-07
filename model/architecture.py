@@ -103,8 +103,8 @@ class MultiAttentionHead(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head)
         v = v.view(B, T, self.n_head, C // self.n_head)
 
-        q = self.query_embedding(q)
-        k = self.key_embedding(k)
+        #q = self.query_embedding(q)
+        #k = self.key_embedding(k)
 
         k = k.transpose(1, 2)  # (B, nh, T, hs)
         q = q.transpose(1, 2)  # (B, nh, T, hs)
@@ -134,7 +134,8 @@ class MultiAttentionHead(nn.Module):
             else:
                 out = (q @ k.transpose(-2, -1)) * (1.0 / (k.size(-1) ** -0.5))
                 #att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-                out = F.softmax(out, dim=-1)
+                #out = F.softmax(out, dim=-1)
+                out = F.sigmoid(out)
                 output = self.attn_dropout(out)
 
         if self.sliding_attention:
@@ -157,6 +158,7 @@ class FeedForward(nn.Module):
 
     def forward(self, x) -> torch.Tensor:
         return self.dropout(self.w2(nn.functional.silu(self.w1(x)) * self.w3(x)))
+        #return self.dropout(self.w2(nn.functional.sigmoid(self.w1(x)) * self.w3(x)))
 
 
 class AttentionBlock(nn.Module):

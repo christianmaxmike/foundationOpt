@@ -55,7 +55,7 @@ class SineGaussianBuilder:
         soc = self.sin_or_cos(x, self.trig_fncs[sc_idx])
         gauss = self.gaussian_bell(x, self.gausses[gauss_idx])
         partial_y = self.combine_two_fncs(soc, gauss, self.ops[op_idx])
-        print (partial_y[:5])
+        # print (partial_y[:5])
         sc_idx += 1
         gauss_idx += 1
         op_idx += 1        # print(self.ops)
@@ -332,7 +332,7 @@ def run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs):
     args = []
     for idx, fnc in enumerate(fnc_list):
 #        for _ in range(num_hebo_runs):
-            print (fnc)
+            # print (fnc)
             args.append((fnc, num_hebo_steps, idx))
     
     # Create a pool of workers

@@ -30,7 +30,7 @@ if __name__=="__main__":
 
     parser.add_argument(
         "--batchSize",
-        default=8192,
+        default=4096,
         type=int,
         help="The size of each batch used during training or processing. Default is 8192."
     )
@@ -51,7 +51,7 @@ if __name__=="__main__":
 
     parser.add_argument(
         "--maxComponents",
-        default=8,
+        default=5,
         type=int,
         help="The maximum number of components to use in the model. Default is 8."
     )
@@ -79,7 +79,7 @@ if __name__=="__main__":
 
     parser.add_argument(
         "--numHeboSteps",
-        default=100,
+        default=50,
         type=int,
         help="The number of optimization steps to perform during HEBO. Default is 100."
     )
