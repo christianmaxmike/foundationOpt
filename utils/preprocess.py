@@ -89,8 +89,8 @@ def load_and_preprocess_data(data_config, sequence_length=None, device=None):
         y_max = float(Y_2d.max())
     
     # Split into train/val/test.
-    train_ratio = data_config.get('train_ratio', 0.8)
-    val_ratio   = data_config.get('val_ratio', 0.1)
+    train_ratio = data_config.get('train_ratio', 0.7)
+    val_ratio   = data_config.get('val_ratio', 0.2)
     test_ratio  = data_config.get('test_ratio', 0.1)
     N = X.shape[0]
     train_size = int(train_ratio * N)

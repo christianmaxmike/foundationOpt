@@ -287,9 +287,9 @@ class PFNTransformer(nn.Module):
         
         seq shape: [B, T, (x_dim + y_dim)]
         """
-        if self.training:
+        # if self.training:
             # If the model is in training mode, data is assumed to already be scaled.
-            return seq
+        return seq
 
         # Otherwise (eval mode), apply transform based on transform_type
         x_part = seq[..., :self.x_dim]
