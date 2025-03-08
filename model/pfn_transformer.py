@@ -179,6 +179,7 @@ class PFNTransformer(nn.Module):
         self.nar_inference_flag = nar_inference_flag
 
         # Decide default bounding ranges if not provided
+        self.transform_type = transform_type
         if transform_type == "power":
             default_x_min, default_x_max = -4.0, 4.0
             default_y_min, default_y_max = -4.0, 4.0
@@ -278,23 +279,76 @@ class PFNTransformer(nn.Module):
         Access y_max as a float.
         """
         return self.y_max_buf.item()
+    
+    def transform_input(self, seq: torch.Tensor) -> torch.Tensor:
+        """
+        During eval mode, transform raw data from [x_min, x_max] -> [0,1] (or do other transforms).
+        During training mode, assume 'seq' is already scaled, so we do nothing.
+        
+        seq shape: [B, T, (x_dim + y_dim)]
+        """
+        if self.training:
+            # If the model is in training mode, data is assumed to already be scaled.
+            return seq
+
+        # Otherwise (eval mode), apply transform based on transform_type
+        x_part = seq[..., :self.x_dim]
+        y_part = seq[..., self.x_dim:]
+
+        if self.transform_type == 'power':
+            # This is a *linear* approximation for demonstration
+            # from [x_min, x_max] -> [0,1]
+            denom_x = (self.x_max - self.x_min) if (self.x_max > self.x_min) else 1e-10
+            x_scaled = (x_part - self.x_min) / denom_x
+
+            denom_y = (self.y_max - self.y_min) if (self.y_max > self.y_min) else 1e-10
+            y_scaled = (y_part - self.y_min) / denom_y
+
+        elif self.transform_type == 'minmax':
+            # If we truly expect [0,1] data at inference, do nothing
+            x_scaled = x_part
+            y_scaled = y_part
+        else:
+            # Default / no transform
+            x_scaled = x_part
+            y_scaled = y_part
+
+        return torch.cat([x_scaled, y_scaled], dim=-1)
+
+    def inverse_transform_x(self, x_model: torch.Tensor) -> torch.Tensor:
+        """
+        Inverse-transform an X prediction from the model's scale [0,1] back to [x_min, x_max].
+        For inference-time usage when you want to interpret predicted X's in the original domain.
+        """
+        if self.training:
+            # In training mode, we usually keep everything in the scaled domain,
+            # so no inverse transform is applied.
+            return x_model
+
+        if self.transform_type == 'power':
+            # [0,1] -> [x_min, x_max]
+            return self.x_min + x_model * (self.x_max - self.x_min)
+        elif self.transform_type == 'minmax':
+            return x_model
+        else:
+            return x_model
 
     def forward_with_binning(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        seq: [B, T, (x_dim + y_dim)] — input sequence of X and Y values.
-        Returns:
-          (logits, targets):
-            logits: [B, T_out, input_dim, num_bins]
-            targets: either raw continuous targets [B, T_out, input_dim] (if use_bar_distribution)
-                     or integer bin indices [B, T_out, input_dim] (if not).
+        Process input sequence and return (logits, targets).
+        Handles data transform automatically in eval mode.
         """
+        # 1) Transform input if in eval mode
+        seq_transformed = self.transform_input(seq)
+
+        # 2) Then run whichever forward pass you’ve already implemented
         if self.use_autoregression:
             if self.training or not self.nar_inference_flag:
-                return self._forward_ar(seq)
+                return self._forward_ar(seq_transformed)
             else:
-                return self._forward_nar(seq)
+                return self._forward_nar(seq_transformed)
         else:
-            return self._forward_nar(seq)
+            return self._forward_nar(seq_transformed)
 
     def _forward_nar(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
