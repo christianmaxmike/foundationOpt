@@ -179,3 +179,5 @@ output*/
 datasets/
 *.png
 /wandb
+
+/checkpoints/

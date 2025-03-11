@@ -8,6 +8,8 @@ import os
 from multiprocessing import Process
 import multiprocessing
 from utils.helper import load_batch, save_batch
+from sklearn.preprocessing import PowerTransformer
+
 
 
 def rec_fnc(fnc_dict, min_x_value=0, max_x_value=1, sequence_length=100):
@@ -176,16 +178,18 @@ def generate(args):
     y_batch = np.stack(hebo_ys)
 
     #y_norm = (y_batch +1 / 2) 
-
+    #print ("before pt:\n", x_batch[0])
+    pt = PowerTransformer()
+    x_batch = pt.fit_transform(x_batch.reshape(-1, 1)).reshape(x_batch.shape)
+    y_batch = pt.fit_transform(y_batch.reshape(-1, 1)).reshape(y_batch.shape)
+    #print ("after pt:\n", x_batch[0])
     # save batch file
     save_batch(x_batch, 
-                y_batch, 
-                fnc_list, 
-                os.path.join("datasets", "single", "1D_triv", f"data_{args.id}.npz"), 
-                os.path.join("datasets", "single", "1D_triv", f"models_{args.id}.dill")
+               y_batch, 
+               fnc_list, 
+               os.path.join("datasets", "single", "1D_triv", f"data_{args.id}.npz"), 
+               os.path.join("datasets", "single", "1D_triv", f"models_{args.id}.dill")
     )
-
-
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
@@ -196,8 +200,8 @@ if __name__=="__main__":
     parser.add_argument("--maxComponents", default=2, type=int)
     parser.add_argument("--minX", default=0, type=int)
     parser.add_argument("--maxX", default=1, type=int)
-    parser.add_argument("--numHeboTrials", default=4, type=int)
-    parser.add_argument("--numHeboSteps", default=25, type=int)
+    parser.add_argument("--numHeboTrials", default=1, type=int)
+    parser.add_argument("--numHeboSteps", default=50, type=int)
     args = parser.parse_args()
     
     # Parameters
@@ -211,23 +215,3 @@ if __name__=="__main__":
     num_hebo_steps = args.numHeboSteps
 
     generate(args)
-
-    # generate trigonometric fncs
-    #fnc_list = gen_trigonometric_fncs(batch_size, min_x_value, max_x_value, sequence_length, min_num_components, max_num_components)
-
-    # run hebo
-    # hebo_xs, hebo_ys = run_hebo(fnc_list, num_hebo_steps, num_hebo_runs)
-    #hebo_xs, hebo_ys = run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs)
-
-    # Convert data to numpy array in the right format
-    #x_batch = np.stack([np.expand_dims(np.array(hebo_xs[i]), 1) for i in range(len(hebo_xs))])
-    #y_batch = np.stack(hebo_ys)
-
-    # save batch file
-    #save_batch(x_batch, 
-    #            y_batch, 
-    #            fnc_list, 
-    #            os.path.join("datasets", "single", "1D_simple", f"data_{args.id}.npz"), 
-    #            os.path.join("datasets", "single", "1D_simple", f"models_{args.id}.dill")
-    #)
- 
