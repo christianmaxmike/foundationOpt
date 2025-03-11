@@ -31,6 +31,7 @@ def parse_args():
     parser.add_argument('--forecast_steps', type=int, default=1, help="How many steps to predict in the future.")
     parser.add_argument('--seed', type=int, default=42, help="Random seed.")
     parser.add_argument('--sequence_length', type=int, default=None, help="Length of the input sequences.")
+    parser.add_argument('--force_reprocess', action='store_true', help="Force reprocessing of data.")
     return parser.parse_args()
 
 def main():
@@ -53,7 +54,12 @@ def main():
     # Data Loading & Preprocessing
     data_config_input = config['data']
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    data_dict = load_and_preprocess_data(data_config=data_config_input, sequence_length=args.sequence_length, device=device)
+    data_dict = load_and_preprocess_data(
+        data_config=data_config_input, 
+        sequence_length=args.sequence_length, 
+        force_reprocess=args.force_reprocess,
+        device=device
+    )
     X_train = data_dict['X_train']
     X_val = data_dict['X_val']
     X_test = data_dict['X_test']
@@ -101,11 +107,6 @@ def main():
         use_bar_distribution=(loss_type == 'bar'),
         bar_dist_smoothing=model_config.get('bar_dist_smoothing', 0.0),
         full_support=model_config.get('full_support', False),
-        transform_type=data_config_input.get('transform_type', 'none'),
-        x_min=data_config_model['x_min'],
-        x_max=data_config_model['x_max'],
-        y_min=data_config_model['y_min'],
-        y_max=data_config_model['y_max'],
     ).to(device)
     
     # Optimizer & LR Scheduler

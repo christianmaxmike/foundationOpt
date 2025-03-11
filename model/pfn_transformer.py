@@ -156,11 +156,6 @@ class PFNTransformer(nn.Module):
         use_bar_distribution: bool = False,
         bar_dist_smoothing: float = 0.0,
         full_support: bool = False,
-        transform_type: str = "power",
-        x_min: float = None,
-        x_max: float = None,
-        y_min: float = None,
-        y_max: float = None,
     ):
         super().__init__()
         # Save data dimensions
@@ -178,38 +173,12 @@ class PFNTransformer(nn.Module):
         self.use_autoregression = use_autoregression
         self.nar_inference_flag = nar_inference_flag
 
-        # Decide default bounding ranges if not provided
-        self.transform_type = transform_type
-        if transform_type == "power":
-            default_x_min, default_x_max = -4.0, 4.0
-            default_y_min, default_y_max = -4.0, 4.0
-        else:
-            default_x_min, default_x_max = 0.0, 1.0
-            default_y_min, default_y_max = 0.0, 1.0
-
-        # Final chosen bounds
-        final_x_min = x_min if x_min is not None else default_x_min
-        final_x_max = x_max if x_max is not None else default_x_max
-        final_y_min = y_min if y_min is not None else default_y_min
-        final_y_max = y_max if y_max is not None else default_y_max
-
-        # Register these as buffers so that they are saved/restored with state_dict.
-        # We'll store them as 1-element tensors and later call .item() where needed.
-        self.register_buffer("x_min_buf", torch.tensor([final_x_min], dtype=torch.float32))
-        self.register_buffer("x_max_buf", torch.tensor([final_x_max], dtype=torch.float32))
-        self.register_buffer("y_min_buf", torch.tensor([final_y_min], dtype=torch.float32))
-        self.register_buffer("y_max_buf", torch.tensor([final_y_max], dtype=torch.float32))
-
         # Build BinningProcessors for X and Y using the registered buffers.
         self.binner_x = BinningProcessor(
             num_bins=num_bins,
-            min_val=self.x_min_buf.item(),
-            max_val=self.x_max_buf.item(),
         )
         self.binner_y = BinningProcessor(
             num_bins=num_bins,
-            min_val=self.y_min_buf.item(),
-            max_val=self.y_max_buf.item(),
         )
 
         # Input embedding (transform from input_dim -> hidden_dim)
@@ -239,12 +208,12 @@ class PFNTransformer(nn.Module):
             from model.bar_distribution import BarDistribution
             # Build bar distributions for X and Y using the same bin edges
             self.bar_distribution_x = BarDistribution(
-                borders=torch.linspace(self.x_min_buf.item(), self.x_max_buf.item(), steps=num_bins + 1),
+                borders=torch.linspace(-1, 1, steps=num_bins + 1),
                 smoothing=bar_dist_smoothing,
                 ignore_nan_targets=True
             )
             self.bar_distribution_y = BarDistribution(
-                borders=torch.linspace(self.y_min_buf.item(), self.y_max_buf.item(), steps=num_bins + 1),
+                borders=torch.linspace(-1, 1, steps=num_bins + 1),
                 smoothing=bar_dist_smoothing,
                 ignore_nan_targets=True
             )
@@ -252,103 +221,22 @@ class PFNTransformer(nn.Module):
             self.bar_distribution_x = None
             self.bar_distribution_y = None
 
-    @property
-    def x_min(self) -> float:
-        """
-        Access x_min as a float.
-        """
-        return self.x_min_buf.item()
 
-    @property
-    def x_max(self) -> float:
-        """
-        Access x_max as a float.
-        """
-        return self.x_max_buf.item()
-
-    @property
-    def y_min(self) -> float:
-        """
-        Access y_min as a float.
-        """
-        return self.y_min_buf.item()
-
-    @property
-    def y_max(self) -> float:
-        """
-        Access y_max as a float.
-        """
-        return self.y_max_buf.item()
-    
-    def transform_input(self, seq: torch.Tensor) -> torch.Tensor:
-        """
-        During eval mode, transform raw data from [x_min, x_max] -> [0,1] (or do other transforms).
-        During training mode, assume 'seq' is already scaled, so we do nothing.
-        
-        seq shape: [B, T, (x_dim + y_dim)]
-        """
-        # if self.training:
-            # If the model is in training mode, data is assumed to already be scaled.
-        return seq
-
-        # Otherwise (eval mode), apply transform based on transform_type
-        x_part = seq[..., :self.x_dim]
-        y_part = seq[..., self.x_dim:]
-
-        if self.transform_type == 'power':
-            # This is a *linear* approximation for demonstration
-            # from [x_min, x_max] -> [0,1]
-            denom_x = (self.x_max - self.x_min) if (self.x_max > self.x_min) else 1e-10
-            x_scaled = (x_part - self.x_min) / denom_x
-
-            denom_y = (self.y_max - self.y_min) if (self.y_max > self.y_min) else 1e-10
-            y_scaled = (y_part - self.y_min) / denom_y
-
-        elif self.transform_type == 'minmax':
-            # If we truly expect [0,1] data at inference, do nothing
-            x_scaled = x_part
-            y_scaled = y_part
-        else:
-            # Default / no transform
-            x_scaled = x_part
-            y_scaled = y_part
-
-        return torch.cat([x_scaled, y_scaled], dim=-1)
-
-    def inverse_transform_x(self, x_model: torch.Tensor) -> torch.Tensor:
-        """
-        Inverse-transform an X prediction from the model's scale [0,1] back to [x_min, x_max].
-        For inference-time usage when you want to interpret predicted X's in the original domain.
-        """
-        if self.training:
-            # In training mode, we usually keep everything in the scaled domain,
-            # so no inverse transform is applied.
-            return x_model
-
-        if self.transform_type == 'power':
-            # [0,1] -> [x_min, x_max]
-            return self.x_min + x_model * (self.x_max - self.x_min)
-        elif self.transform_type == 'minmax':
-            return x_model
-        else:
-            return x_model
 
     def forward_with_binning(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Process input sequence and return (logits, targets).
         Handles data transform automatically in eval mode.
         """
-        # 1) Transform input if in eval mode
-        seq_transformed = self.transform_input(seq)
 
         # 2) Then run whichever forward pass you’ve already implemented
         if self.use_autoregression:
             if self.training or not self.nar_inference_flag:
-                return self._forward_ar(seq_transformed)
+                return self._forward_ar(seq)
             else:
-                return self._forward_nar(seq_transformed)
+                return self._forward_nar(seq)
         else:
-            return self._forward_nar(seq_transformed)
+            return self._forward_nar(seq)
 
     def _forward_nar(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """

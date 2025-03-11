@@ -211,7 +211,7 @@ def main():
 
             # 4) Turn bin indices -> scaled x in [0,1], then inverse_transform to the original domain
             x_bin_val = model.binner_x.unbin_values(x_bin_idx)  # in model's internal scale
-            next_x = model.inverse_transform_x(x_bin_val).item()
+            next_x = x_bin_val.item()  # scalar
 
         # 5) Evaluate ground truth at next_x
         next_y = f_test(next_x)
@@ -303,9 +303,10 @@ def main():
                 # but careful: new_x is in original domain, so let's
                 # re-tensor it and transform to model scale:
                 new_x_scaled_t = torch.tensor([new_x_scaled], device=device, dtype=torch.float32)
-                new_x_bin_idx = model.binner_x.bin_values(model.transform_input(
-                    new_x_scaled_t.view(1,1,-1)  # shape [B=1, T=1, D=1 for x]
-                )[..., :1]).item()
+                # new_x_bin_idx = model.binner_x.bin_values(model.transform_input(
+                #     new_x_scaled_t.view(1,1,-1)  # shape [B=1, T=1, D=1 for x]
+                # )[..., :1]).item()
+                new_x_bin_idx = model.binner_x.bin_values(new_x_scaled_t).item()
 
         bins = np.arange(model.num_bins)
         ax_right.bar(bins, prob, alpha=0.7)
