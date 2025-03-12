@@ -65,3 +65,9 @@ typing-extensions==4.12.2
 tzdata==2025.1
 wrapt==1.17.2
 zipp==3.21.0
+torchao
+tqdm
+xformers
+wandb
+optuna
+torchtune

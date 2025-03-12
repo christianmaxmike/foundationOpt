@@ -1,0 +1,34 @@
+run_name: base_longer
+
+wandb:
+  project: FoundOpt
+
+data:
+  dataset_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/"
+  transform_type: "power"
+  models_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/models_0.dill"
+
+model:
+  input_dim: !!int 2
+  hidden_dim: !!int 64
+  num_layers: !!int 2
+  num_heads: !!int 2
+  dropout: !!float 0.3
+  num_bins: !!int 32
+
+optimizer:
+  lr: !!float 1e-4
+  weight_decay: !!float 1e-5
+  scheduler:
+    type: cosine
+    T_max: !!int 500
+
+training:
+  batch_size: !!int 512
+  epochs: !!int 500
+  ckpt_dir: "./checkpoints"
+  save_every: !!int 5
+
+losses:
+  exploration_weight: !!float 0.2
+  convergence_weight: !!float 0.2

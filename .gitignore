@@ -180,4 +180,13 @@ datasets/
 *.png
 /wandb
 
+checkpoints/
+data_viz/
+eval_results/
+wandb/
+
+checkpoints/
+data_viz/
+eval_results/
+wandb/
 /checkpoints/

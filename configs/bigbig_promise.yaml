@@ -1,0 +1,39 @@
+run_name: bigbig_promise
+
+wandb:
+  project: FoundOpt
+
+data:
+  dataset_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/"
+  transform_type: "power"
+  models_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/models_0.dill"
+
+model:
+  input_dim: !!int 2
+  hidden_dim: !!int 128
+  num_layers: !!int 4
+  num_heads: !!int 4
+  dropout: !!float 0.4
+  num_bins: !!int 64
+  use_positional_encoding: true
+  use_autoregressive: true
+  loss_type: bar
+  bar_dist_smoothing: !!float 0.0
+  full_support: false
+
+optimizer:
+  lr: !!float 1e-4
+  weight_decay: !!float 1e-5
+  scheduler:
+    warmup_fraction: !!float 0.1
+    plateau_fraction: !!float 0.3
+
+training:
+  batch_size: !!int 256
+  epochs: !!int 100
+  ckpt_dir: "./checkpoints"
+  save_every: !!int 5
+
+losses:
+  exploration_weight: !!float 0.2
+  convergence_weight: !!float 0.2
