@@ -11,7 +11,6 @@ from utils.helper import load_batch, save_batch
 from sklearn.preprocessing import PowerTransformer
 
 
-
 def rec_fnc(fnc_dict, min_x_value=0, max_x_value=1, sequence_length=100):
   x_values = np.linspace(min_x_value, max_x_value, sequence_length)  # Extend the range for more valleys
   y_values = np.zeros_like(x_values)
@@ -37,6 +36,7 @@ def eval_x(x, fnc_dict) -> np.ndarray:
         else:
             y_values += tmp
     return y_values
+
 
 def obj(params : pd.DataFrame, fnc_dict) -> np.ndarray:
     """
@@ -107,8 +107,8 @@ def run_single_hebo(args):
         opt.observe(rec, obj(rec, fnc))
         x_hebo.append(rec.iloc[0].item())
         y_hebo.append(opt.y[-1])
-    #print (len(x_hebo), len(y_hebo))
-    return x_hebo, y_hebo
+    return x_hebo, y_hebo, opt.y.min()
+
 
 def run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs):
     """
@@ -116,6 +116,7 @@ def run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs):
     """
     hebo_xs = []
     hebo_ys = []
+    hebo_ys_best = []
     
     # Prepare the arguments for all HEBO runs
     args = []
@@ -129,31 +130,32 @@ def run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs):
         results = list(tqdm(pool.imap(run_single_hebo, args), total=len(args), desc="HEBO Runs"))
     
     # Collect the results
-    for x_hebo, y_hebo in results:
+    for x_hebo, y_hebo, y_best in results:
         hebo_xs.append(x_hebo)
         hebo_ys.append(y_hebo)
+        hebo_ys_best.append(y_best)
     
-    return hebo_xs, hebo_ys
+    return hebo_xs, hebo_ys, hebo_ys_best
 
-def run_hebo(fnc_list, num_hebo_steps, num_hebo_runs):
-    # HEBO loop
-    hebo_xs = []
-    hebo_ys = []
-    for fnc_idx in range(len(fnc_list)):
-        print (f"Processing fnc {fnc_idx}...")
-        for _ in range(num_hebo_runs):
-            space = DesignSpace().parse([{'name' : 'x', 'type' : 'num', 'lb' : 0, 'ub' : 1}])
-            opt   = HEBO(space)
-            x_hebo = []
-            y_hebo = []
-            for i in tqdm(range(num_hebo_steps)):
-                rec = opt.suggest(n_suggestions = 1)
-                opt.observe(rec, obj(rec, fnc_list[fnc_idx]))
-                x_hebo.append(rec.iloc[0].item())
-                y_hebo.append(opt.y[-1]) 
-            hebo_xs.append(x_hebo)
-            hebo_ys.append(y_hebo)
-    return hebo_xs, hebo_ys
+# def run_hebo(fnc_list, num_hebo_steps, num_hebo_runs):
+#     # HEBO loop
+#     hebo_xs = []
+#     hebo_ys = []
+#     for fnc_idx in range(len(fnc_list)):
+#         print (f"Processing fnc {fnc_idx}...")
+#         for _ in range(num_hebo_runs):
+#             space = DesignSpace().parse([{'name' : 'x', 'type' : 'num', 'lb' : 0, 'ub' : 1}])
+#             opt   = HEBO(space)
+#             x_hebo = []
+#             y_hebo = []
+#             for i in tqdm(range(num_hebo_steps)):
+#                 rec = opt.suggest(n_suggestions = 1)
+#                 opt.observe(rec, obj(rec, fnc_list[fnc_idx]))
+#                 x_hebo.append(rec.iloc[0].item())
+#                 y_hebo.append(opt.y[-1]) 
+#             hebo_xs.append(x_hebo)
+#             hebo_ys.append(y_hebo)
+#     return hebo_xs, hebo_ys
 
 def generate(args):
     # Parameters
@@ -171,21 +173,25 @@ def generate(args):
 
     # run hebo
     # hebo_xs, hebo_ys = run_hebo(fnc_list, num_hebo_steps, num_hebo_runs)
-    hebo_xs, hebo_ys = run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs)
+    hebo_xs, hebo_ys, hebo_ys_best = run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs)
 
     # Convert data to numpy array in the right format
     x_batch = np.stack([np.expand_dims(np.array(hebo_xs[i]), 1) for i in range(len(hebo_xs))])
     y_batch = np.stack(hebo_ys)
+    y_batch_best = np.stack(hebo_ys_best)
 
     #y_norm = (y_batch +1 / 2) 
     #print ("before pt:\n", x_batch[0])
     pt = PowerTransformer()
     x_batch = pt.fit_transform(x_batch.reshape(-1, 1)).reshape(x_batch.shape)
     y_batch = pt.fit_transform(y_batch.reshape(-1, 1)).reshape(y_batch.shape)
+    #y_batch_best = pt.fit_transform(y_batch_best.reshape(-1, 1)).reshape(y_batch_best.shape)
+
     #print ("after pt:\n", x_batch[0])
     # save batch file
     save_batch(x_batch, 
-               y_batch, 
+               y_batch,
+               y_batch_best,
                fnc_list, 
                os.path.join("datasets", "single", "1D_triv", f"data_{args.id}.npz"), 
                os.path.join("datasets", "single", "1D_triv", f"models_{args.id}.dill")

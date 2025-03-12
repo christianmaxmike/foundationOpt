@@ -58,4 +58,4 @@ def load_batch(filename, model_fn):
     f = np.load(filename)
     with open(model_fn, 'rb') as file:
         models = load(file)
-    return f["x"], f["y"], models
+    return f["x"], f["y"], f['y_best'], models

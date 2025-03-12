@@ -26,5 +26,5 @@ source $HOME/venvs/foundOpt/bin/activate
 
 #python generation.py --id $1
 #python SineCosGenerator.py --id $1
-python generate_data.py --type "SimpleTrig" --id $1 --minComponents 1 --maxComponents 2 --batchSize 4096 --numHeboTrials 1 --numHeboSteps 50
+python generate_data.py --type "SimpleTrig" --id $1 --minComponents 1 --maxComponents 2 --batchSize 8 --numHeboTrials 1 --numHeboSteps 50
 #python train_model_main.py 
