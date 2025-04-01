@@ -180,13 +180,13 @@ datasets/
 *.png
 /wandb
 
-checkpoints/
+checkpoints*/
 data_viz/
 eval_results/
 wandb/
 
-checkpoints/
-data_viz/
-eval_results/
-wandb/
-/checkpoints/
+# mac specifics
+.DS*
+
+# slurm scripts
+*.sh

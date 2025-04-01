@@ -9,12 +9,16 @@ import matplotlib.pyplot as plt
 
 from dill import load
 
+from sklearn.preprocessing import PowerTransformer
+
 # ----------------------------
 # 1) Import your PFNTransformer
 #    and cross_entropy_binning_loss if needed
 # ----------------------------
 from model.pfn_transformer import PFNTransformer
 from model.losses import cross_entropy_binning_loss
+
+from utils.preprocess import load_and_preprocess_data
 
 # ----------------------------------------------------
 # 2) rec_fnc: given a function dictionary, returns
@@ -50,11 +54,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate a PFN Transformer on a 1D function (MINIMIZATION).")
     parser.add_argument('--seed', type=int, default=42, help="Random seed.")
     parser.add_argument('--config_dir', type=str,
-                        default="/work/dlclarge1/janowski-opt/foundationOpt/configs/",
+                        default="./configs/",
                         help="Path to YAML config file.")
     parser.add_argument('--checkpoint', type=str, default=None,
                         help="Full path to trained model checkpoint (overrides run_name).")
-    parser.add_argument('--run_name', type=str, default=None,
+    parser.add_argument('--run_name', type=str, default="bar",
                         help="Name of the run (used to load config).")
     parser.add_argument('--steps', type=int, default=30,
                         help="Number of next-step predictions to produce.")
@@ -66,6 +70,8 @@ def parse_args():
                         help="Use NAR mode for inference (parallel prediction).")
     parser.add_argument('--model_idx', type=int, default=0,
                         help="Index of the function dictionary in models_0.dill.")
+    parser.add_argument('--sequence_length', type=int, default=None, 
+                        help="Length of the input sequences.")
     return parser.parse_args()
 
 def get_temperature(step_i, n_steps, temp_high=2.0, temp_low=0.1):
@@ -88,9 +94,36 @@ def main():
         config = yaml.safe_load(f)
     run_name = config.get('run_name', 'default_run')
     if args.checkpoint is None:
-        args.checkpoint = f"./checkpoints/{run_name}/model_final.pth"
+        args.checkpoint = f"./checkpoints/{run_name}/model_epoch15.pth"
+
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # for Mac:
+    # device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+
+    data_config_input = config['data']
+    data_dict = load_and_preprocess_data(data_config=data_config_input, sequence_length=args.sequence_length, device=device)
+    X_train = data_dict['X_train']
+    X_val = data_dict['X_val']
+    X_test = data_dict['X_test']
     
+    y_train = data_dict['y_train']
+    y_val = data_dict['y_val']
+    y_test = data_dict['y_test']
+
+    y_train_best = data_dict.get('y_train_best', None)
+    y_val_best = data_dict.get('y_val_best', None)
+    y_test_best = data_dict.get('y_test_best', None)
+    
+    X_train_last = data_dict.get("X_train_last", None)
+    X_test_last = data_dict.get("X_test_last", None)
+    X_val_last = data_dict.get("X_val_last", None)
+    y_train_last = data_dict.get("y_train_last", None)
+    y_test_last = data_dict.get("y_test_last", None)
+    y_val_last = data_dict.get("y_val_last", None)
+    data_config_model = data_dict['data_config']
+
+
     model_config = config['model']
     loss_type = model_config.get('loss_type', 'cross_entropy')
     model = PFNTransformer(
@@ -104,11 +137,15 @@ def main():
         num_bins=model_config.get('num_bins', 32),
         pre_norm=model_config.get('pre_norm', True),
         use_positional_encoding=model_config.get('use_positional_encoding', False),
-        use_autoregression=model_config.get('use_autoregression', False),
+        use_autoregression=model_config.get('use_autoregressive', False),
         use_bar_distribution=(loss_type == 'bar'),
         bar_dist_smoothing=model_config.get('bar_dist_smoothing', 0.0),
         full_support=model_config.get('full_support', False),
         nar_inference_flag=args.nar_inference_flag,
+        x_min=data_config_model['x_min'],
+        x_max=data_config_model['x_max'],
+        y_min=data_config_model['y_min'],
+        y_max=data_config_model['y_max'],
     ).to(device)
     
     # Load checkpoint and set model to eval mode.
@@ -120,6 +157,11 @@ def main():
     print("Model transformation bounds:")
     print(f"  x: [{model.x_min}, {model.x_max}]")
     print(f"  y: [{model.y_min}, {model.y_max}]")
+
+    model.binner_x.min_val = model.x_min
+    model.binner_x.max_val = model.x_max
+    model.binner_y.min_val = model.y_min
+    model.binner_y.max_val = model.y_max
     
     # ---------------------------------------------------------------------
     # B) Load function dictionary from models_0.dill and build evaluation function.
@@ -136,21 +178,29 @@ def main():
     # ---------------------------------------------------------------------
     # C) Initialize context points (teacher-forcing)
     # ---------------------------------------------------------------------
-    x0, x1 = 0.1, 0.9  # these should be in the original ground truth domain [0,1]
+    x0, x1 = list(X_train[args.model_idx, :2, :].cpu().numpy().flatten()) # 0.1, 0.9  # these should be in the original ground truth domain [0,1]
     context = [x0, x1]
     context_vals = [f_test(x0), f_test(x1)]
     all_x = [x0, x1]
     all_y = [context_vals[0], context_vals[1]]
-    
+    # context= list([v[0] for v in (X_train[0, :10, :]).cpu().numpy()])
+    # all_x = context
+    # all_y = [f_test(v) for v in context]
+    # context_vals = all_y
     # ---------------------------------------------------------------------
     # D) Generate next steps using PFNTransformer + bin sampling
     # ---------------------------------------------------------------------
+
+    print ("binner_x: ", model.binner_x.min_val)
+
+    all_logits = []
+    probs = []
     for step_i in range(args.steps):
         # Build sequence: shape [T, input_dim] where input_dim = x_dim+y_dim.
         seq_np = np.stack([np.array(context), np.array(context_vals)], axis=-1)  # [T, 2]
         seq_torch = torch.tensor(seq_np, dtype=torch.float32, device=device).unsqueeze(0)  # [1, T, 2]
         with torch.no_grad():
-            logits, _ = model.forward_with_binning(seq_torch)
+            logits, _ = model.forward_with_binning(seq_torch) # shape: B x T x (dimx+dim_y) x numbins
             if logits.shape[1] == 0:
                 print("No next-step prediction. Stopping.")
                 break
@@ -158,19 +208,33 @@ def main():
             # For x dimension, use model.binner_x.
             if not args.sample_next_x:
                 x_bin_logits = next_logits[:, 0, :]
-                x_bin_idx = torch.argmin(x_bin_logits, dim=-1)
+                #x_bin_idx = torch.argmin(x_bin_logits, dim=-1)
+                x_bin_idx = torch.argmax(x_bin_logits, dim=-1)
             else:
                 temperature = get_temperature(step_i, args.steps, temp_high=2.0, temp_low=0.7)
                 prob = torch.softmax(next_logits / temperature, dim=-1)
                 prob_x = prob[:, 0, :]
+
+                probs.append(prob_x)
                 x_bin_idx = torch.multinomial(prob_x, 1)
+            #print ("before binner:", x_bin_idx.item())
             x_bin_val = model.binner_x.unbin_values(x_bin_idx)
+            # x_bin_val = model.orh_x.unbin(x_bin_idx)
+            # print("after binner:", x_bin_val.item())
             next_x = x_bin_val.item()
+        all_logits.append(logits)
         next_y = f_test(next_x)
         context.append(next_x)
         context_vals.append(next_y)
         all_x.append(next_x)
         all_y.append(next_y)
+
+        pt = PowerTransformer()
+        ctx_tmp = np.array(context)
+        ctx_vals_tmp = np.array(context_vals)
+        context = list(pt.fit_transform(ctx_tmp.reshape(-1, 1)).reshape(ctx_tmp.shape))
+        context_vals = list(pt.fit_transform(ctx_vals_tmp.reshape(-1, 1)).reshape(ctx_vals_tmp.shape))
+        #y_batch_pt = pt.fit_transform(y_batch_raw.reshape(-1, 1)).reshape(y_batch_raw.shape)
     
     # ---------------------------------------------------------------------
     # E) Plot final trajectory
@@ -202,26 +266,27 @@ def main():
     for row_i in range(steps_to_plot):
         ax_left = axs[row_i, 0]
         ax_right = axs[row_i, 1]
-        partial_x = all_x[:row_i+2]
-        partial_y = all_y[:row_i+2]
-        if (row_i + 2) < len(all_x):
+        partial_x = all_x[:row_i+3]
+        partial_y = all_y[:row_i+3]
+        if (row_i + 3) < len(all_x):
             new_x = all_x[row_i+2]
             new_y = all_y[row_i+2]
         else:
             new_x = all_x[-1]
             new_y = all_y[-1]
         ax_left.plot(x_grid_full, y_grid_full, 'b--', alpha=0.7, label="f(x)")
-        ax_left.scatter(partial_x[:-1], partial_y[:-1], c='blue', label="Context")
-        ax_left.scatter([partial_x[-1]], [partial_y[-1]], c='orange', label="Last Pt")
+        ax_left.scatter(partial_x[:-2], partial_y[:-2], c='blue', label="Context")
+        ax_left.scatter([partial_x[-2]], [partial_y[-2]], c='orange', label="Last Pt")
         ax_left.scatter([new_x], [new_y], c='red', label="New Pt")
         ax_left.set_title(f"Step {row_i+1}: Context + Next Pt")
-        ax_left.set_xlim(0, 1)
+        #ax_left.set_xlim(0, 1)
         ax_left.set_ylim(min(y_grid_full)-0.1, max(y_grid_full)+0.1)
         ax_left.legend(loc='best')
-        seq_np = np.stack([np.array(partial_x), np.array(partial_y)], axis=-1)
-        seq_torch = torch.tensor(seq_np, dtype=torch.float32, device=device).unsqueeze(0)
+        #seq_np = np.stack([np.array(partial_x), np.array(partial_y)], axis=-1)
+        #seq_torch = torch.tensor(seq_np, dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
-            logits, _ = model.forward_with_binning(seq_torch)
+            logits = all_logits[row_i]
+            # logits, _ = model.forward_with_binning(seq_torch)
             if logits.shape[1] == 0:
                 prob = np.zeros(model.num_bins)
                 chosen_bin = 0
@@ -229,17 +294,19 @@ def main():
             else:
                 next_logits = logits[:, -1, 0, :]  # logits for x dimension
                 prob = torch.softmax(next_logits, dim=-1).cpu().numpy().flatten()
-                prob = 1.0 - prob  # For minimization: lower values preferred.
+                # prob = 1.0 - prob  # For minimization: lower values preferred.
                 chosen_bin = np.argmax(prob)
                 new_x_bin_idx = model.binner_x.bin_values(
                     torch.tensor([[new_x]], dtype=torch.float32, device=device)
                 ).item()
         bins = np.arange(model.num_bins)
         ax_right.bar(bins, prob, color='gray', alpha=0.7)
-        ax_right.axvline(chosen_bin, color='red', linestyle='--', label=f"Chosen bin = {chosen_bin}")
-        ax_right.axvline(new_x_bin_idx, color='blue', linestyle=':', label=f"Actual bin = {new_x_bin_idx}")
+        #ax_right.axvline(chosen_bin, color='red', linestyle='--', label=f"Chosen bin (argmax bin) = {chosen_bin}")
+        #ax_right.axvline(new_x_bin_idx, color='blue', linestyle=':', label=f"Actual bin (new x bin) = {new_x_bin_idx}")
+        ax_right.axvline(chosen_bin, color='red', linestyle='--', label=f"Argmax bin = {chosen_bin}")
+        ax_right.axvline(new_x_bin_idx, color='blue', linestyle=':', label=f"Pred. bin) = {new_x_bin_idx}")
         ax_right.set_title(f"Step {row_i+1}: Distribution over x-bins")
-        ax_right.set_xlim(0, model.num_bins-1)
+        ax_right.set_xlim(0-0.5, model.num_bins-1+0.5)
         ax_right.set_ylim(0, 1.05)
         ax_right.legend(loc='best')
     fig2.tight_layout()

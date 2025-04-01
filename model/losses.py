@@ -35,7 +35,7 @@ def convergence_loss_fn(x_batch: torch.Tensor, model):
     return 0.0
 
 
-def bar_distribution_loss(bar_dist_module, logits, targets):
+def bar_distribution_loss(bar_dist_module, logits, targets, ohr_module):
     """
     logits: [B, T_out, D, num_bins]
     targets: [B, T, D] or [B, T_out, D]
@@ -56,7 +56,7 @@ def bar_distribution_loss(bar_dist_module, logits, targets):
         # [B, T_out] -> permute -> [T_out, B]
         dim_targets = targets[:, :, dim_idx].permute(1, 0)
 
-        dim_loss = bar_dist_module(dim_logits, dim_targets)
+        dim_loss = bar_dist_module(dim_logits, dim_targets, model=ohr_module)
         total_loss += dim_loss.mean()
 
     return total_loss

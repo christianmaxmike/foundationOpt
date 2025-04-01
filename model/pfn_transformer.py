@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
 
+from .bar_distribution import OrdinalRegressionHead
+
 def _get_activation_fn(activation: str):
     """
     Returns the activation function corresponding to the given string.
@@ -22,14 +24,23 @@ class BinningProcessor(nn.Module):
     Converts continuous values in [min_val, max_val] into discrete bins using torch.bucketize.
     Assumes input values are already transformed (if needed).
     """
-    def __init__(self, num_bins=32, min_val=0.0, max_val=1.0):
+    def __init__(self, num_bins=32, min_val=0.0, max_val=1.0, train_data=None):
         super().__init__()
         self.num_bins = num_bins
         self.min_val = min_val
         self.max_val = max_val
 
         # Create bin boundaries (length = num_bins - 1).
-        boundaries = torch.linspace(min_val, max_val, steps=num_bins + 1)[1:-1]
+        if train_data is None:
+            boundaries = torch.linspace(min_val, max_val, steps=num_bins + 1)[1:-1]
+        else:
+            ## Replace linear binning with quantile-based binning
+            boundaries = torch.quantile(
+                train_data.flatten(), 
+                torch.linspace(0, 1, steps=num_bins + 1)[1:-1].to(train_data.device)
+            )
+
+
         # Register as a buffer so it's moved to the correct device with the model.
         self.register_buffer("boundaries", boundaries)
 
@@ -148,7 +159,7 @@ class PFNTransformer(nn.Module):
         forecast_steps: int = 1,
         num_steps: int = 50,
         dim_feedforward: int = 128,
-        activation: str = "relu",
+        activation: str = "gelu",
         pre_norm: bool = True,
         use_positional_encoding: bool = False,
         use_autoregression: bool = False,
@@ -161,6 +172,7 @@ class PFNTransformer(nn.Module):
         x_max: float = None,
         y_min: float = None,
         y_max: float = None,
+        train_data: torch.Tensor = None
     ):
         super().__init__()
         # Save data dimensions
@@ -204,15 +216,23 @@ class PFNTransformer(nn.Module):
             num_bins=num_bins,
             min_val=self.x_min_buf.item(),
             max_val=self.x_max_buf.item(),
+            train_data=None#train_data
         )
         self.binner_y = BinningProcessor(
             num_bins=num_bins,
             min_val=self.y_min_buf.item(),
             max_val=self.y_max_buf.item(),
+            train_data=None#train_data
         )
 
         # Input embedding (transform from input_dim -> hidden_dim)
+        #print ("input_dim: ", self.input_dim)
         self.input_embed = nn.Linear(self.input_dim, hidden_dim)
+        self.input_embedding_x = nn.Embedding(self.num_bins, hidden_dim//2)
+        self.input_embedding_y = nn.Embedding(self.num_bins, hidden_dim//2)
+
+        self.orh_x = OrdinalRegressionHead(x_dim, self.num_bins, x_min=final_x_min, x_max=final_x_max)
+        self.orh_y = OrdinalRegressionHead(y_dim, self.num_bins, x_min=final_y_min, x_max=final_y_max)
 
         # Optional positional embedding
         self.pos_embed = nn.Embedding(num_steps, hidden_dim) if use_positional_encoding else None
@@ -279,7 +299,7 @@ class PFNTransformer(nn.Module):
         """
         return self.y_max_buf.item()
 
-    def forward_with_binning(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward_with_binning(self, seq: torch.Tensor, best=None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         seq: [B, T, (x_dim + y_dim)] — input sequence of X and Y values.
         Returns:
@@ -292,25 +312,39 @@ class PFNTransformer(nn.Module):
             if self.training or not self.nar_inference_flag:
                 return self._forward_ar(seq)
             else:
-                return self._forward_nar(seq)
+                return self._forward_nar(seq, best)
         else:
-            return self._forward_nar(seq)
+            return self._forward_nar(seq, best)
 
-    def _forward_nar(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _forward_nar(self, seq: torch.Tensor, last_x=None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Non-autoregressive forward pass. We do teacher forcing on T-1 steps to predict T-1 next steps.
         """
         B, T, _ = seq.shape
-        tokens = seq[:, :-1, :]  # All but last step as input
-        x_embed = self.embed_tokens(tokens)
+
+        tokens = seq[:, :-1, :]  # All but last step as input  # Batch x seq-1 x (dimx+dimy)
+
+        # usage of ordinalRegressionHead
+        # x_bucket = self.orh_x(tokens[..., :self.x_dim])
+        # y_bucket = self.orh_y(tokens[..., self.x_dim:])
+        # binned_tokens = torch.cat([x_bucket.argmax(dim=-1, keepdims=True), 
+        #                            y_bucket.argmax(dim=-1, keepdims=True)], dim=-1)
+        # x_embed = self.embed_tokens(tokens) # tokens: B x T-1 x xdim + ydim; x_embed: B x T-1, hiddendim
+        
+        
+        binned_tokens = torch.cat([self.bar_distribution_x.map_to_bucket_idx(tokens[..., :self.x_dim]),    # bar dist yields: B x T-1x1
+                                   self.bar_distribution_y.map_to_bucket_idx(tokens[..., self.x_dim:])], dim=-1) # BxT-1xdimx+dimy
+
+        x_embed = self.embed_tokens(binned_tokens)
         for block in self.blocks:
             x_embed = block(x_embed)
 
         # Project to (input_dim * num_bins) then reshape
         logits_all = self.out_proj(x_embed)  # [B, T-1, input_dim * num_bins]
-        logits_all = logits_all.view(B, T-1, self.input_dim, self.num_bins)
+        logits_all = logits_all.view(B, -1, self.input_dim, self.num_bins)
 
         # Next-step ground-truth for each feature
+        # print (seq.shape) # batch x seqLenght x (xdim + ydim)
         next_values = seq[:, 1:, :]  # shape [B, T-1, input_dim]
 
         # If using bar distribution, we return the raw continuous targets
@@ -318,11 +352,11 @@ class PFNTransformer(nn.Module):
         if self.use_bar_distribution:
             targets = next_values  # raw
         else:
-            target_bins_x = self.binner_x.bin_values(next_values[..., :self.x_dim])
-            target_bins_y = self.binner_y.bin_values(next_values[..., self.x_dim:])
+            target_bins_x = self.binner_x.bin_values(next_values[..., :self.x_dim])            
+            target_bins_y = self.binner_y.bin_values(next_values[..., self.x_dim:-1])
             targets = torch.cat([target_bins_x, target_bins_y], dim=-1)
 
-        return logits_all, targets
+        return logits_all, targets #, target_bins_y_best
 
     def _forward_ar(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -372,8 +406,14 @@ class PFNTransformer(nn.Module):
         2) Optionally add positional embeddings.
         Returns: [B, T, hidden_dim].
         """
-        B, T, _ = tokens.shape
-        x = self.input_embed(tokens)
+        B, T, _ = tokens.shape # B x T x (x_dim + y_dim)
+        # tokens_binned = self.binner_x.bin_values(tokens[..., :self.x_dim]) # B x T x xdim
+        # x = self.input_embed(tokens)
+        
+        x = self.input_embedding_x(tokens[:, :, 0]) 
+        y = self.input_embedding_y(tokens[:, :, 1])
+        x = torch.cat([x,y], dim=-1)
+        
         if self.pos_embed is not None:
             positions = torch.arange(T, device=tokens.device).unsqueeze(0)
             x += self.pos_embed(positions)

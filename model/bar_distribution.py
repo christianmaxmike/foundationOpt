@@ -1,9 +1,72 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class OrdinalRegressionHead(nn.Module):
+    def __init__(self, hidden_size, num_bins, x_min=0., x_max=1.):
+        """
+        Args:
+            hidden_size: Dimension of input features.
+            num_bins: Total ordinal bins (e.g., 4).
+        """
+        super().__init__()
+        self.num_bins = num_bins
+        self.fc = nn.Linear(hidden_size, 1)  # Maps to scalar z
+        self.base = nn.Parameter(torch.tensor(0.0))
+        self.delta = nn.Parameter(torch.zeros(num_bins - 1))  # Increments for thresholds
+        self.x_min = x_min
+        self.x_max = x_max
+
+    def forward(self, x):
+        """
+        x: Tensor of shape (batch_size, hidden_size)
+        Returns:
+            bin_probs: Tensor of shape (batch_size, num_bins) representing the probability for each bin.
+        """
+        B, T, d = x.shape
+        z = self.fc(x.reshape(B*T, d))  # (batch_size, 1)
+        # Compute ordered thresholds: b_i = base + cumulative sum of softplus(delta)
+        thresholds = self.base + torch.cumsum(F.softplus(self.delta), dim=0)  # (num_bins-1,)
+        # Cumulative probabilities: F(i)=σ(b_i - z)
+        cum_probs = torch.sigmoid(thresholds.unsqueeze(0) - z)  # (batch_size, num_bins-1)
+        # Derive bin probabilities:
+        p1 = cum_probs[:, :1]                           # P(y=1)=F(1)
+        p_diff = cum_probs[:, 1:] - cum_probs[:, :-1]     # P(y=k)=F(k)-F(k-1)
+        p_last = 1 - cum_probs[:, -1:]                    # P(y=num_bins)=1-F(num_bins-1)
+        bin_probs = torch.cat([p1, p_diff, p_last], dim=1)
+        return bin_probs.reshape(B, T, self.num_bins)
+
+    def predict(self, x):
+        """
+        Returns predicted ordinal bin via argmax.
+        """
+        bin_probs = self.forward(x)
+        return torch.argmax(bin_probs, dim=1)
+
+
+    def unbin(self, bin_idx):
+        """
+        Maps a bin index back to a value in [x_min, x_max] assuming uniform binning.
+        
+        Args:
+            bin_idx: Tensor of shape (batch_size,) containing bin indices (0 to num_bins-1).
+        
+        Returns:
+            values: Tensor of shape (batch_size,) with corresponding values in [x_min, x_max].
+        """
+        # Convert bin index to a float in [0, 1]
+        normalized_pos = (bin_idx.float() + 0.5) / self.num_bins  # Center of the bin
+        # Linearly map [0, 1] → [x_min, x_max]
+        values = self.x_min + (self.x_max - self.x_min) * normalized_pos
+        return values
 
 class BarDistribution(nn.Module):
-    def __init__(self, borders: torch.Tensor, smoothing=.0, ignore_nan_targets=True): # here borders should start with min and end with max, where all values lie in (min,max) and are sorted
+    def __init__(self, borders: torch.Tensor, smoothing=.0, ignore_nan_targets=True, distance_weighting_sigma=None): # here borders should start with min and end with max, where all values lie in (min,max) and are sorted
         '''
         :param borders:
         :param smoothing:
@@ -23,15 +86,39 @@ class BarDistribution(nn.Module):
         self.ignore_nan_targets = ignore_nan_targets
         self.to(borders.device)
 
+        # Precompute bin centers
+        bin_centers = (self.borders[:-1] + self.borders[1:]) / 2
+        self.register_buffer('bin_centers', bin_centers)
+
+        # Distance-based weighting
+        self.distance_weighting_sigma = distance_weighting_sigma
+        if distance_weighting_sigma is not None:
+            # Compute pairwise distances between bin centers
+            distances = torch.abs(bin_centers.unsqueeze(1) - bin_centers.unsqueeze(0))
+            # Apply Gaussian kernel
+            weights = torch.exp(-0.5 * (distances / distance_weighting_sigma) ** 2)
+            # Normalize weights so each row sums to 1 (optional)
+            weights = weights / weights.sum(dim=1, keepdim=True)
+            self.register_buffer('distance_weights', weights)
+        else:
+            self.register_buffer('distance_weights', torch.eye(self.num_bars))
+
+        self.to(borders.device)
+
     def __setstate__(self, state):
         super().__setstate__(state)
         self.__dict__.setdefault('append_mean_pred', False)
 
     def map_to_bucket_idx(self, y):
-        target_sample = torch.searchsorted(self.borders, y) - 1
-        target_sample[y == self.borders[0]] = 0
-        target_sample[y == self.borders[-1]] = self.num_bars - 1
-        return target_sample
+        #target_sample = torch.searchsorted(self.borders, y) - 1
+        #target_sample[y == self.borders[0]] = 0
+        #target_sample[y == self.borders[-1]] = self.num_bars - 1
+        #return target_sample
+        # Ensure values on boundaries are assigned to the correct bin
+        return torch.clamp(
+            torch.searchsorted(self.borders, y, side='right') - 1,
+            0, self.num_bars - 1
+        )
 
     def ignore_init(self, y):
         ignore_loss_mask = torch.isnan(y)
@@ -52,13 +139,18 @@ class BarDistribution(nn.Module):
     #     y[ignore_loss_mask] = self.borders[0] # this is just a default value, it will be ignored anyway
     #     return ignore_loss_mask
 
-    def compute_scaled_log_probs(self, logits):
+    def compute_scaled_log_probs(self, logits): # logits: seq-1 x Batch x n_bins
         # this is equivalent to log(p(y)) of the density p
         bucket_log_probs = torch.log_softmax(logits, -1)
-        scaled_bucket_log_probs = bucket_log_probs - torch.log(self.bucket_widths)
+        #scaled_bucket_log_probs = bucket_log_probs - torch.log(self.bucket_widths)
+        # Only scale if bins are non-uniform
+        if not torch.allclose(self.bucket_widths, self.bucket_widths[0]):
+            scaled_bucket_log_probs = bucket_log_probs - torch.log(self.bucket_widths)
+        else:
+            scaled_bucket_log_probs = bucket_log_probs
         return scaled_bucket_log_probs
 
-    def forward(self, logits, y, mean_prediction_logits=None):
+    def forward(self, logits, y, mean_prediction_logits=None, gamma=0.5, alpha=None, model=None):
         """
         Computes the negative log-density (loss). 
         - y: [T, B] (or some shape compatible with logits.shape[:-1])
@@ -73,8 +165,8 @@ class BarDistribution(nn.Module):
         ignore_loss_mask = self.ignore_init(y)
 
         # 3) Convert continuous y-values to bucket indices (internally uses torch.searchsorted)
-        target_sample = self.map_to_bucket_idx(y)
-
+        target_sample = self.map_to_bucket_idx(y)  # seq-1 x Batch
+        # target_sample = model(y.unsqueeze(-1).permute(1,0,2)).argmax(dim=-1).permute(1,0)
         # 4) Check that all targets are within the valid bin range
         assert (target_sample >= 0).all() and (target_sample < self.num_bars).all(), (
             f"y {y} not in support set for borders (min_y, max_y) {self.borders}"
@@ -82,11 +174,39 @@ class BarDistribution(nn.Module):
         assert logits.shape[-1] == self.num_bars, f"{logits.shape[-1]} vs {self.num_bars}"
 
         # 5) Compute scaled log-probs for each bucket
-        scaled_bucket_log_probs = self.compute_scaled_log_probs(logits)
+        # scaled_bucket_log_probs = self.compute_scaled_log_probs(logits)  # seq-1 x batch x n_bins
+        
+        # Compute probabilities (needed for Focal Loss)
+        bucket_probs = torch.softmax(logits, dim=-1)  # [T, B, num_bars]
+        true_bin_probs = bucket_probs.gather(-1, target_sample[..., None]).squeeze(-1)  # [T, B]
+
+        # ADD 
+        if self.distance_weighting_sigma is not None:
+            # Create smoothed target distribution using distance weights
+            target_dist = F.one_hot(target_sample, num_classes=self.num_bars).float()
+            smoothed_target_dist = target_dist @ self.distance_weights
+            # Compute KL divergence between predicted and smoothed target
+            smoothed_target_log_dist = torch.log_softmax(smoothed_target_dist, dim=-1)
+            nll_loss = F.kl_div(
+                #scaled_bucket_log_probs,
+                torch.log_softmax(logits, -1), 
+                smoothed_target_log_dist, 
+                reduction='none', 
+                log_target=True
+            ).sum(-1)
+        else:
+            # Standard cross-entropy -> step 6)
+            #nll_loss = -scaled_bucket_log_probs.gather(-1, target_sample[..., None]).squeeze(-1)  # seq-1 x batch
+            
+            # Use Focal Loss
+            nll_loss = -((1 - true_bin_probs) ** gamma) * torch.log(true_bin_probs + 1e-10)  # [T, B]
+            if alpha is not None:
+                alpha_weight = alpha[target_sample]  # [T, B]
+                nll_loss *= alpha_weight
 
         # 6) Negative log-likelihood for the correct bucket at each time-step/sample
         #    => shape [T, B]
-        nll_loss = -scaled_bucket_log_probs.gather(-1, target_sample[..., None]).squeeze(-1)
+        #nll_loss = -scaled_bucket_log_probs.gather(-1, target_sample[..., None]).squeeze(-1)
 
         # 7) Optional mean_prediction_logits term (non-myopic BO extension)
         if mean_prediction_logits is not None:
@@ -97,7 +217,8 @@ class BarDistribution(nn.Module):
             nll_loss = torch.cat((nll_loss, self.mean_loss(logits, scaled_mean_log_probs)), dim=0)
 
         # 8) Label smoothing
-        smooth_loss = -scaled_bucket_log_probs.mean(dim=-1)         # average negative log-prob
+        # smooth_loss = -scaled_bucket_log_probs.mean(dim=-1)         # average negative log-prob
+        smooth_loss = -torch.log_softmax(logits, -1).mean(dim=-1)
         smoothing = self.smoothing if self.training else 0.0
         loss = (1.0 - smoothing) * nll_loss + smoothing * smooth_loss
 

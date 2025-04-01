@@ -23,13 +23,22 @@ def load_and_preprocess_data(data_config, sequence_length=None, device=None):
         if file.endswith(".npz"):
             filepath = os.path.join(dataset_path, file)
             with np.load(filepath) as npz_file:
-                part_x = npz_file["x"]
-                part_y = npz_file["y"]
+                part_x = npz_file["x_pt"]
+                part_y = npz_file["y_pt"]
                 all_x.append(part_x)
                 all_y.append(part_y)
     X = np.concatenate(all_x, axis=0)  # shape [N, T, D]
     y = np.concatenate(all_y, axis=0)  # shape [N, T, Ydim] or [N, T]
-    
+
+    print ("X shape ", X.shape)
+    print ("y shape", y.shape)
+    indices = np.argmin(y, axis=1)
+    indices = indices.squeeze()
+    X_best = np.broadcast_to(X[:][indices][:], X.shape)
+    y_best = np.broadcast_to(y[:][indices][:], y.shape)
+    print ("X_best shape", X_best.shape)
+    print ("y_best shape", y_best.shape)
+
     transform_type = data_config.get('transform_type', 'none')
     if transform_type == 'minmax':
         # Process X
@@ -95,21 +104,47 @@ def load_and_preprocess_data(data_config, sequence_length=None, device=None):
     N = X.shape[0]
     train_size = int(train_ratio * N)
     val_size = int(val_ratio * N)
+    
+    # shuffle dataset
     indices = np.arange(N)
     np.random.shuffle(indices)
+    
+    # reshuffle x, y datasets
     X = X[indices]
     y = y[indices]
+    y_best = np.broadcast_to(np.min(y, axis=1, keepdims=True), y.shape)
+    X_best = X_best[indices]
+    y_best = y_best[indices]
+
+
+    # extract training set
     X_train = X[:train_size]
+    X_best_train = X_best[:train_size]
     y_train = y[:train_size]
-    X_val = X[train_size:train_size+val_size]
-    y_val = y[train_size:train_size+val_size]
-    X_test = X[train_size+val_size:]
-    y_test = y[train_size+val_size:]
+    y_train_best = y_best[:train_size]
+    y_train_last = y_best[:train_size]
     
+    # extract validation set
+    X_val = X[train_size:train_size+val_size]
+    X_best_val = X_best[train_size:train_size+val_size]
+    y_val = y[train_size:train_size+val_size]
+    y_val_best = y_best[train_size:train_size+val_size]
+    y_val_last = y_best[train_size:train_size+val_size]
+    
+    # extract test datset
+    X_test = X[train_size + val_size:]
+    X_best_test = X_best[train_size + val_size:]
+    y_test = y[train_size + val_size:]
+    y_test_best = y[train_size + val_size:]
+    y_test_last = y_best[train_size + val_size:]
+
     if sequence_length is not None:
         X_train = X_train[:, :sequence_length]
         X_val = X_val[:, :sequence_length]
         X_test = X_test[:, :sequence_length]
+        X_best_train = X_best_train[:, :sequence_length]
+        X_best_val = X_best_val[:, :sequence_length]
+        X_best_test = X_best_test[:, :sequence_length]
         if X_train.ndim == y_train.ndim:
             y_train = y_train[:, :sequence_length]
             y_val = y_val[:, :sequence_length]
@@ -118,10 +153,20 @@ def load_and_preprocess_data(data_config, sequence_length=None, device=None):
     X_train = torch.tensor(X_train, dtype=torch.float32, device=device)
     X_val = torch.tensor(X_val, dtype=torch.float32, device=device)
     X_test = torch.tensor(X_test, dtype=torch.float32, device=device)
+    X_best_train = torch.tensor(X_best_train, dtype=torch.float32, device=device)
+    X_best_val = torch.tensor(X_best_val, dtype=torch.float32, device=device)
+    X_best_test = torch.tensor(X_best_test, dtype=torch.float32, device=device)
+
     y_train = torch.tensor(y_train, dtype=torch.float32, device=device)
     y_val = torch.tensor(y_val, dtype=torch.float32, device=device)
     y_test = torch.tensor(y_test, dtype=torch.float32, device=device)
-    
+    y_train_best = torch.tensor(y_train_best, dtype=torch.float32, device=device)
+    y_val_best = torch.tensor(y_val_best, dtype=torch.float32, device=device)
+    y_test_best = torch.tensor(y_test_best, dtype=torch.float32, device=device)
+    y_train_last = torch.tensor(y_train_last, dtype=torch.float32, device=device)
+    y_test_last = torch.tensor(y_test_last, dtype=torch.float32, device=device)
+    y_val_last = torch.tensor(y_val_last, dtype=torch.float32, device=device)
+
     print(f"After preprocessing:")
     print(f"  X_train: {X_train.min().item():.4f} / {X_train.max().item():.4f}")
     print(f"  y_train: {y_train.min().item():.4f} / {y_train.max().item():.4f}")
@@ -146,5 +191,14 @@ def load_and_preprocess_data(data_config, sequence_length=None, device=None):
         "y_train": y_train,
         "y_val": y_val,
         "y_test": y_test,
+        "y_train_best": y_train_best,
+        "y_test_best": y_test_best,
+        "y_val_best": y_val_best,
+        "X_train_last": X_best_train,
+        "X_test_last": X_best_test,
+        "X_val_last": X_best_val,
+        "y_train_last": y_train_last,
+        "y_test_last": y_test_last,
+        "y_val_last": y_val_last,
         "data_config": data_config_out
     }
