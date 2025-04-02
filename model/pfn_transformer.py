@@ -34,12 +34,11 @@ class BinningProcessor(nn.Module):
         if train_data is None:
             boundaries = torch.linspace(min_val, max_val, steps=num_bins + 1)[1:-1]
         else:
-            ## Replace linear binning with quantile-based binning
+            # Example: Using quantiles from the training data
             boundaries = torch.quantile(
                 train_data.flatten(), 
                 torch.linspace(0, 1, steps=num_bins + 1)[1:-1].to(train_data.device)
             )
-
 
         # Register as a buffer so it's moved to the correct device with the model.
         self.register_buffer("boundaries", boundaries)
@@ -134,17 +133,13 @@ class PFNTransformer(nn.Module):
     """
     Transformer-based trajectory prediction model.
 
-    - The input has shape [B, T, (x_dim + y_dim)], where x_dim is the dimension of X
-      and y_dim is the dimension of Y.
-    - The model discretizes X and Y values into bins using separate BinningProcessor objects.
-    - If 'use_bar_distribution' is True, the forward pass returns the raw continuous targets
-      (so a separate BarDistribution can compute negative log likelihood).
-      Otherwise, it returns integer bin indices for a cross-entropy loss.
-
-    By default, the model has two forward paths:
-      1. Autoregressive (_forward_ar): Step-by-step prediction
-      2. Non-autoregressive (_forward_nar): Teacher-forcing all at once
-    This is controlled by 'use_autoregression' and 'nar_inference_flag'.
+    * Allows toggling binning vs. raw regression vs. ordinal regression head (ORH) 
+      for X and Y with minimal code changes.
+    * Also supports an optional BAR distribution approach (self.use_bar_distribution).
+    * Preserves the original AR (autoregressive) and NAR (teacher-forcing) paths.
+    
+    Also includes a `forward_with_binning(seq, last_x=None)` method for code compatibility 
+    with training scripts that specifically call it.
     """
 
     def __init__(
@@ -172,15 +167,17 @@ class PFNTransformer(nn.Module):
         x_max: float = None,
         y_min: float = None,
         y_max: float = None,
-        train_data: torch.Tensor = None
+        train_data: torch.Tensor = None,
+        use_binning: bool = False,
+        use_orh: bool = False,
     ):
         super().__init__()
-        # Save data dimensions
+        # Basic dimensions
         self.x_dim = x_dim
         self.y_dim = y_dim
         self.input_dim = x_dim + y_dim
 
-        # Save key model hyperparameters
+        # Transformer hyperparams
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.num_heads = num_heads
@@ -190,54 +187,108 @@ class PFNTransformer(nn.Module):
         self.use_autoregression = use_autoregression
         self.nar_inference_flag = nar_inference_flag
 
-        # Decide default bounding ranges if not provided
-        if transform_type == "power":
-            default_x_min, default_x_max = -4.0, 4.0
-            default_y_min, default_y_max = -4.0, 4.0
+        # Flags for how we handle X/Y
+        self.use_binning = use_binning
+        self.use_orh = use_orh
+        self.use_bar_distribution = use_bar_distribution
+
+        # If we're going to bin, figure out min/max
+        if self.use_binning or self.use_orh:
+            # Decide default bounding ranges if not provided
+            if transform_type == "power":
+                default_x_min, default_x_max = -4.0, 4.0
+                default_y_min, default_y_max = -4.0, 4.0
+            else:
+                default_x_min, default_x_max = 0.0, 1.0
+                default_y_min, default_y_max = 0.0, 1.0
+
+            final_x_min = x_min if x_min is not None else default_x_min
+            final_x_max = x_max if x_max is not None else default_x_max
+            final_y_min = y_min if y_min is not None else default_y_min
+            final_y_max = y_max if y_max is not None else default_y_max
+
+            self.register_buffer("x_min_buf", torch.tensor([final_x_min], dtype=torch.float32))
+            self.register_buffer("x_max_buf", torch.tensor([final_x_max], dtype=torch.float32))
+            self.register_buffer("y_min_buf", torch.tensor([final_y_min], dtype=torch.float32))
+            self.register_buffer("y_max_buf", torch.tensor([final_y_max], dtype=torch.float32))
         else:
-            default_x_min, default_x_max = 0.0, 1.0
-            default_y_min, default_y_max = 0.0, 1.0
+            # If not using binning or ORH, no buffers needed
+            self.x_min_buf = None
+            self.x_max_buf = None
+            self.y_min_buf = None
+            self.y_max_buf = None
 
-        # Final chosen bounds
-        final_x_min = x_min if x_min is not None else default_x_min
-        final_x_max = x_max if x_max is not None else default_x_max
-        final_y_min = y_min if y_min is not None else default_y_min
-        final_y_max = y_max if y_max is not None else default_y_max
+        # Build binning processors if needed
+        if self.use_binning and not self.use_orh:
+            self.binner_x = BinningProcessor(
+                num_bins=num_bins,
+                min_val=self.x_min_buf.item() if self.x_min_buf is not None else 0.0,
+                max_val=self.x_max_buf.item() if self.x_max_buf is not None else 1.0,
+                train_data=None#train_data
+            )
+            self.binner_y = BinningProcessor(
+                num_bins=num_bins,
+                min_val=self.y_min_buf.item() if self.y_min_buf is not None else 0.0,
+                max_val=self.y_max_buf.item() if self.y_max_buf is not None else 1.0,
+                train_data=None#train_data
+            )
+        else:
+            self.binner_x = None
+            self.binner_y = None
 
-        # Register these as buffers so that they are saved/restored with state_dict.
-        # We'll store them as 1-element tensors and later call .item() where needed.
-        self.register_buffer("x_min_buf", torch.tensor([final_x_min], dtype=torch.float32))
-        self.register_buffer("x_max_buf", torch.tensor([final_x_max], dtype=torch.float32))
-        self.register_buffer("y_min_buf", torch.tensor([final_y_min], dtype=torch.float32))
-        self.register_buffer("y_max_buf", torch.tensor([final_y_max], dtype=torch.float32))
+        # Build ORH if needed
+        if self.use_orh:
+            # Typically ORH or Binning (but can combine if you want).
+            final_x_min = self.x_min_buf.item() if self.x_min_buf is not None else -4.0
+            final_x_max = self.x_max_buf.item() if self.x_max_buf is not None else 4.0
+            final_y_min = self.y_min_buf.item() if self.y_min_buf is not None else -4.0
+            final_y_max = self.y_max_buf.item() if self.y_max_buf is not None else 4.0
 
-        # Build BinningProcessors for X and Y using the registered buffers.
-        self.binner_x = BinningProcessor(
-            num_bins=num_bins,
-            min_val=self.x_min_buf.item(),
-            max_val=self.x_max_buf.item(),
-            train_data=None#train_data
-        )
-        self.binner_y = BinningProcessor(
-            num_bins=num_bins,
-            min_val=self.y_min_buf.item(),
-            max_val=self.y_max_buf.item(),
-            train_data=None#train_data
-        )
+            self.orh_x = OrdinalRegressionHead(x_dim, self.num_bins,
+                                               x_min=final_x_min, x_max=final_x_max)
+            self.orh_y = OrdinalRegressionHead(y_dim, self.num_bins,
+                                               x_min=final_y_min, x_max=final_y_max)
+        else:
+            self.orh_x = None
+            self.orh_y = None
 
-        # Input embedding (transform from input_dim -> hidden_dim)
-        #print ("input_dim: ", self.input_dim)
-        self.input_embed = nn.Linear(self.input_dim, hidden_dim)
-        self.input_embedding_x = nn.Embedding(self.num_bins, hidden_dim//2)
-        self.input_embedding_y = nn.Embedding(self.num_bins, hidden_dim//2)
+        # BAR distribution heads
+        if self.use_bar_distribution:
+            from model.bar_distribution import BarDistribution
+            # Build bar distributions for X and Y using the same bin edges
+            x_minval = self.x_min_buf.item() if self.x_min_buf is not None else 0.0
+            x_maxval = self.x_max_buf.item() if self.x_max_buf is not None else 1.0
+            y_minval = self.y_min_buf.item() if self.y_min_buf is not None else 0.0
+            y_maxval = self.y_max_buf.item() if self.y_max_buf is not None else 1.0
 
-        self.orh_x = OrdinalRegressionHead(x_dim, self.num_bins, x_min=final_x_min, x_max=final_x_max)
-        self.orh_y = OrdinalRegressionHead(y_dim, self.num_bins, x_min=final_y_min, x_max=final_y_max)
+            self.bar_distribution_x = BarDistribution(
+                borders=torch.linspace(x_minval, x_maxval, steps=num_bins + 1),
+                smoothing=bar_dist_smoothing,
+                ignore_nan_targets=True
+            )
+            self.bar_distribution_y = BarDistribution(
+                borders=torch.linspace(y_minval, y_maxval, steps=num_bins + 1),
+                smoothing=bar_dist_smoothing,
+                ignore_nan_targets=True
+            )
+        else:
+            self.bar_distribution_x = None
+            self.bar_distribution_y = None
+
+        # Embeddings:
+        #  - If not binning/ORH, we do a single linear embed from (x_dim+y_dim) -> hidden_dim.
+        #  - If binning or ORH, we'll embed integer tokens with separate nn.Embedding modules for X and Y.
+        if not (self.use_binning or self.use_orh):
+            self.input_embed = nn.Linear(self.input_dim, hidden_dim)
+        else:
+            # For binning/ORH we typically embed discrete tokens
+            self.input_embedding_x = nn.Embedding(self.num_bins, hidden_dim // 2)
+            self.input_embedding_y = nn.Embedding(self.num_bins, hidden_dim // 2)
 
         # Optional positional embedding
         self.pos_embed = nn.Embedding(num_steps, hidden_dim) if use_positional_encoding else None
 
-        # A stack of TransformerBlocks
+        # Build Transformer blocks
         self.blocks = nn.ModuleList([
             TransformerBlock(
                 hidden_dim=hidden_dim,
@@ -250,171 +301,229 @@ class PFNTransformer(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # Final projection from hidden_dim -> (input_dim * num_bins)
-        self.out_proj = nn.Linear(hidden_dim, self.input_dim * num_bins)
-
-        self.use_bar_distribution = use_bar_distribution
-        if self.use_bar_distribution:
-            from model.bar_distribution import BarDistribution
-            # Build bar distributions for X and Y using the same bin edges
-            self.bar_distribution_x = BarDistribution(
-                borders=torch.linspace(self.x_min_buf.item(), self.x_max_buf.item(), steps=num_bins + 1),
-                smoothing=bar_dist_smoothing,
-                ignore_nan_targets=True
-            )
-            self.bar_distribution_y = BarDistribution(
-                borders=torch.linspace(self.y_min_buf.item(), self.y_max_buf.item(), steps=num_bins + 1),
-                smoothing=bar_dist_smoothing,
-                ignore_nan_targets=True
-            )
-        else:
-            self.bar_distribution_x = None
-            self.bar_distribution_y = None
+        # Output projection:
+        #  - If binning or ORH, project hidden_dim -> (input_dim * num_bins)
+        #  - Otherwise (no binning), project hidden_dim -> input_dim
+        out_dim = self.input_dim * self.num_bins if (self.use_binning or self.use_orh) else self.input_dim
+        self.out_proj = nn.Linear(hidden_dim, out_dim)
 
     @property
     def x_min(self) -> float:
-        """
-        Access x_min as a float.
-        """
-        return self.x_min_buf.item()
+        return self.x_min_buf.item() if self.x_min_buf is not None else None
 
     @property
     def x_max(self) -> float:
-        """
-        Access x_max as a float.
-        """
-        return self.x_max_buf.item()
+        return self.x_max_buf.item() if self.x_max_buf is not None else None
 
     @property
     def y_min(self) -> float:
-        """
-        Access y_min as a float.
-        """
-        return self.y_min_buf.item()
+        return self.y_min_buf.item() if self.y_min_buf is not None else None
 
     @property
     def y_max(self) -> float:
-        """
-        Access y_max as a float.
-        """
-        return self.y_max_buf.item()
+        return self.y_max_buf.item() if self.y_max_buf is not None else None
 
-    def forward_with_binning(self, seq: torch.Tensor, best=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    # ----------------------------------------------------------------
+    #  Main entrypoints:
+    #   1) forward(...) => returns either (logits, targets) for classification
+    #      or (predictions, targets) for regression, depending on flags
+    #   2) forward_with_binning(...) => forcibly returns classification-like
+    #      outputs (logits, target_bins), used by your training script
+    # ----------------------------------------------------------------
+
+    def forward_with_binning(self, seq: torch.Tensor, last_x=None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        seq: [B, T, (x_dim + y_dim)] — input sequence of X and Y values.
-        Returns:
-          (logits, targets):
+        This method preserves the original signature that your training code expects:
+            logits, target_bins = model.forward_with_binning(...)
+        
+        Internally, it just calls self.forward(...) and returns the same tuple.
+        Make sure you have self.use_binning=True or self.use_orh=True so that 
+        the outputs are shaped like classification: 
             logits: [B, T_out, input_dim, num_bins]
-            targets: either raw continuous targets [B, T_out, input_dim] (if use_bar_distribution)
-                     or integer bin indices [B, T_out, input_dim] (if not).
+            target_bins: [B, T_out, input_dim]
+        """
+        logits, target_bins = self.forward(seq, last_x)
+        return logits, target_bins
+
+    def forward(self, seq: torch.Tensor, best=None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Unified forward method. Chooses AR or NAR path.
+        If binning/ORH is enabled, outputs classification-like logits (plus appropriate targets).
+        If not, outputs raw continuous predictions (plus continuous targets).
         """
         if self.use_autoregression:
             if self.training or not self.nar_inference_flag:
                 return self._forward_ar(seq)
             else:
-                return self._forward_nar(seq, best)
+                return self._forward_nar(seq)
         else:
-            return self._forward_nar(seq, best)
+            return self._forward_nar(seq)
 
-    def _forward_nar(self, seq: torch.Tensor, last_x=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    # ----------------------------------------------------------------
+    #  Non-Autoregressive Forward
+    # ----------------------------------------------------------------
+    def _forward_nar(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Non-autoregressive forward pass. We do teacher forcing on T-1 steps to predict T-1 next steps.
+        Non-autoregressive (teacher-forcing) forward pass. 
+        We'll predict the *next* step from the current step, for all steps in parallel.
         """
         B, T, _ = seq.shape
+        tokens_in = seq[:, :-1, :]      # all but the last step as input
+        next_values = seq[:, 1:, :]     # the actual next-step ground truth
 
-        tokens = seq[:, :-1, :]  # All but last step as input  # Batch x seq-1 x (dimx+dimy)
+        # 1) Embed the inputs
+        x_embed = self._embed_time_series(tokens_in)
 
-        # usage of ordinalRegressionHead
-        # x_bucket = self.orh_x(tokens[..., :self.x_dim])
-        # y_bucket = self.orh_y(tokens[..., self.x_dim:])
-        # binned_tokens = torch.cat([x_bucket.argmax(dim=-1, keepdims=True), 
-        #                            y_bucket.argmax(dim=-1, keepdims=True)], dim=-1)
-        # x_embed = self.embed_tokens(tokens) # tokens: B x T-1 x xdim + ydim; x_embed: B x T-1, hiddendim
-        
-        
-        binned_tokens = torch.cat([self.bar_distribution_x.map_to_bucket_idx(tokens[..., :self.x_dim]),    # bar dist yields: B x T-1x1
-                                   self.bar_distribution_y.map_to_bucket_idx(tokens[..., self.x_dim:])], dim=-1) # BxT-1xdimx+dimy
-
-        x_embed = self.embed_tokens(binned_tokens)
+        # 2) Pass through Transformer
         for block in self.blocks:
             x_embed = block(x_embed)
 
-        # Project to (input_dim * num_bins) then reshape
-        logits_all = self.out_proj(x_embed)  # [B, T-1, input_dim * num_bins]
-        logits_all = logits_all.view(B, -1, self.input_dim, self.num_bins)
-
-        # Next-step ground-truth for each feature
-        # print (seq.shape) # batch x seqLenght x (xdim + ydim)
-        next_values = seq[:, 1:, :]  # shape [B, T-1, input_dim]
-
-        # If using bar distribution, we return the raw continuous targets
-        # otherwise, we bin them for cross-entropy
-        if self.use_bar_distribution:
-            targets = next_values  # raw
+        # 3) Project to final dimension
+        out_raw = self.out_proj(x_embed)  # shape = [B, T-1, out_dim]
+        
+        if self.use_binning or self.use_orh:
+            # out_dim = input_dim * num_bins => reshape
+            logits_all = out_raw.view(B, T-1, self.input_dim, self.num_bins)
+            # And produce classification targets
+            if self.use_bar_distribution:
+                # If using bar distribution, we return raw continuous targets
+                # (the BAR distribution code handles the rest).
+                targets = next_values
+            else:
+                targets = self._make_classification_targets(next_values)
+            return logits_all, targets
         else:
-            target_bins_x = self.binner_x.bin_values(next_values[..., :self.x_dim])            
-            target_bins_y = self.binner_y.bin_values(next_values[..., self.x_dim:-1])
-            targets = torch.cat([target_bins_x, target_bins_y], dim=-1)
+            # No binning/ORH => we do raw regression. out_raw => [B, T-1, input_dim]
+            # Our "targets" are the continuous next_values => [B, T-1, input_dim]
+            return out_raw, next_values
 
-        return logits_all, targets #, target_bins_y_best
-
+    # ----------------------------------------------------------------
+    #  Autoregressive Forward
+    # ----------------------------------------------------------------
     def _forward_ar(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Autoregressive forward pass (step-by-step).
-        We iterate from t=0..(T-2), each time:
-         - embed partial_seq up to t_idx
-         - predict the next item
-         - record logits and target bins
+        Autoregressive forward pass: step-by-step unrolling.
+        We'll predict next step at each time t, feeding in [0..t].
         """
         B, T, _ = seq.shape
         all_logits = []
         all_targets = []
 
+        # for each t from 0..(T-2):
+        #   - embed partial_seq up to t_idx
+        #   - pass through Transformer
+        #   - project to out_dim
+        #   - collect target from seq[:, t_idx+1]
         for t_idx in range(T - 1):
-            partial_seq = seq[:, :t_idx + 1, :]
-            x_embed = self.embed_tokens(partial_seq)
+            partial_seq = seq[:, :t_idx + 1, :]  # [B, t_idx+1, input_dim]
+
+            # 1) embed
+            x_embed = self._embed_time_series(partial_seq)
+
+            # 2) pass through blocks
             for block in self.blocks:
                 x_embed = block(x_embed)
 
-            # Last hidden state => project
+            # 3) take last hidden vector => project
             last_h = x_embed[:, -1, :]  # [B, hidden_dim]
-            logits_all = self.out_proj(last_h).view(B, self.input_dim, self.num_bins)
+            logits_step = self.out_proj(last_h)
 
-            # Next ground truth step
+            # Reshape if classification
+            if self.use_binning or self.use_orh:
+                logits_step = logits_step.view(B, self.input_dim, self.num_bins)
+
+            # Collect ground-truth next step
             target_vals = seq[:, t_idx + 1, :]
-            if self.use_bar_distribution:
-                # Return raw continuous target
-                targets = target_vals
+
+            if (self.use_binning or self.use_orh) and not self.use_bar_distribution:
+                # classification bins
+                targets = self._make_classification_targets(target_vals).unsqueeze(1)
+            elif (self.use_binning or self.use_orh) and self.use_bar_distribution:
+                # raw next values
+                targets = target_vals.unsqueeze(1)
             else:
-                # Return discrete bin indices
-                target_bins_x = self.binner_x.bin_values(target_vals[:, :self.x_dim])
-                target_bins_y = self.binner_y.bin_values(target_vals[:, self.x_dim:])
-                targets = torch.cat([target_bins_x, target_bins_y], dim=-1)
+                # raw next values for regression
+                targets = target_vals.unsqueeze(1)
 
-            all_logits.append(logits_all.unsqueeze(1))
-            all_targets.append(targets.unsqueeze(1))
+            all_logits.append(logits_step.unsqueeze(1))  # => [B,1, ...]
+            all_targets.append(targets)
 
-        # Concatenate along time dimension
-        logits = torch.cat(all_logits, dim=1)   # [B, T-1, input_dim, num_bins]
+        # Combine over time
+        logits = torch.cat(all_logits, dim=1)   # [B, T-1,  (input_dim, num_bins) or input_dim]
         targets = torch.cat(all_targets, dim=1) # [B, T-1, input_dim]
         return logits, targets
 
-    def embed_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+    # ----------------------------------------------------------------
+    #  Helpers
+    # ----------------------------------------------------------------
+    def _embed_time_series(self, seq_values: torch.Tensor) -> torch.Tensor:
         """
-        tokens: [B, T, input_dim].
-        1) Project to hidden_dim.
-        2) Optionally add positional embeddings.
-        Returns: [B, T, hidden_dim].
+        Takes a [B, T, x_dim+y_dim] tensor of *continuous* values and
+        returns a [B, T, hidden_dim] embedding, depending on the flags:
+
+          - use_orh => convert via ORH to distributions => use argmax tokens
+          - use_binning => bin using BinningProcessor or BAR distribution => then embed
+          - otherwise => do a direct linear embedding
         """
-        B, T, _ = tokens.shape # B x T x (x_dim + y_dim)
-        # tokens_binned = self.binner_x.bin_values(tokens[..., :self.x_dim]) # B x T x xdim
-        # x = self.input_embed(tokens)
-        
-        x = self.input_embedding_x(tokens[:, :, 0]) 
-        y = self.input_embedding_y(tokens[:, :, 1])
-        x = torch.cat([x,y], dim=-1)
-        
+        B, T, _ = seq_values.shape
+
+        if self.use_orh:
+            # Convert to ordinal tokens
+            x_logits = self.orh_x(seq_values[..., :self.x_dim])  # => [B,T,x_dim,num_bins]
+            y_logits = self.orh_y(seq_values[..., self.x_dim:])  # => [B,T,y_dim,num_bins]
+            x_tokens = x_logits.argmax(dim=-1).squeeze(-1)  # e.g. [B,T] if x_dim=1
+            y_tokens = y_logits.argmax(dim=-1).squeeze(-1)  # e.g. [B,T] if y_dim=1
+
+            emb_x = self.input_embedding_x(x_tokens)  # => [B,T, hidden_dim//2]
+            emb_y = self.input_embedding_y(y_tokens)  # => [B,T, hidden_dim//2]
+            x_embed = torch.cat([emb_x, emb_y], dim=-1)  # => [B,T, hidden_dim]
+
+        elif self.use_binning:
+            # Binning approach (either using standard BinningProcessor or BAR distribution)
+            if self.bar_distribution_x is not None and self.bar_distribution_y is not None:
+                # Map to bucket indices via BAR distribution
+                x_tokens = self.bar_distribution_x.map_to_bucket_idx(seq_values[..., :self.x_dim])
+                y_tokens = self.bar_distribution_y.map_to_bucket_idx(seq_values[..., self.x_dim:])
+            else:
+                # Standard binning
+                x_tokens = self.binner_x.bin_values(seq_values[..., :self.x_dim]) 
+                y_tokens = self.binner_y.bin_values(seq_values[..., self.x_dim:])
+
+            # Squeeze if x_dim=1, y_dim=1
+            x_tokens = x_tokens.squeeze(-1)
+            y_tokens = y_tokens.squeeze(-1)
+
+            emb_x = self.input_embedding_x(x_tokens)  # => [B,T, hidden_dim//2]
+            emb_y = self.input_embedding_y(y_tokens)  # => [B,T, hidden_dim//2]
+            x_embed = torch.cat([emb_x, emb_y], dim=-1)  # => [B,T, hidden_dim]
+
+        else:
+            # No binning => raw linear embedding
+            x_embed = self.input_embed(seq_values)  # => [B,T, hidden_dim]
+
+        # Optionally add positional encoding
         if self.pos_embed is not None:
-            positions = torch.arange(T, device=tokens.device).unsqueeze(0)
-            x += self.pos_embed(positions)
-        return x
+            positions = torch.arange(T, device=seq_values.device).unsqueeze(0)  # [1,T]
+            x_embed = x_embed + self.pos_embed(positions)  # => [B,T,hidden_dim]
+
+        return x_embed
+
+    def _make_classification_targets(self, next_values: torch.Tensor) -> torch.Tensor:
+        """
+        Takes the raw continuous next_values [B, ..., input_dim] and returns
+        discrete bin indices unless using BAR-dist (in which case it can return
+        raw).
+        """
+        if self.use_bar_distribution:
+            # Return raw; the BarDistribution modules handle the NLL
+            return next_values
+        elif self.use_orh:
+            # Using ORH => get ordinal labels
+            target_bins_x = self.orh_x.map_to_label(next_values[..., :self.x_dim])
+            target_bins_y = self.orh_y.map_to_label(next_values[..., self.x_dim:])
+            return torch.cat([target_bins_x, target_bins_y], dim=-1)
+        else:
+            # Standard binning approach
+            target_bins_x = self.binner_x.bin_values(next_values[..., :self.x_dim])
+            target_bins_y = self.binner_y.bin_values(next_values[..., self.x_dim:])
+            return torch.cat([target_bins_x, target_bins_y], dim=-1)

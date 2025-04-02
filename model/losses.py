@@ -1,18 +1,88 @@
 import torch
 import torch.nn.functional as F
 
-def cross_entropy_binning_loss(logits: torch.Tensor, target_bins: torch.Tensor):
+def cross_entropy_binning_loss(
+    logits: torch.Tensor, 
+    target_bins: torch.Tensor, 
+    x_dim: int, 
+    y_dim: int,
+    reduction: str = "mean"
+) -> torch.Tensor:
     """
-    logits: [B, T, 2, num_bins]
-    target_bins: [B, T, 2]
-    We apply cross-entropy along num_bins dimension for each of the 2 features.
+    Computes Cross Entropy loss *separately* for X and Y portions, then returns the sum (or average) of both.
+
+    Args:
+        logits:      [B, T, x_dim + y_dim, num_bins]
+        target_bins: [B, T, x_dim + y_dim]
+        x_dim:       number of features allocated to X
+        y_dim:       number of features allocated to Y
+        reduction:   "mean" or "sum" or "none" (passed to cross_entropy). Typically "mean".
+
+    Returns:
+        A single scalar combining the cross-entropy for X and Y (by sum if `reduction="mean"`).
+
+    Example usage:
+      loss = cross_entropy_binning_loss_separate(logits, target_bins, x_dim=1, y_dim=1)
     """
-    B, T, Fdim, nbins = logits.shape
-    # Flatten everything except the bins
-    logits_2d = logits.view(-1, nbins)         # [B*T*Fdim, nbins]
-    targets_1d = target_bins.view(-1)          # [B*T*Fdim]
-    loss = F.cross_entropy(logits_2d, targets_1d)
-    return loss
+    # 1) Separate out X portion (first x_dim) and Y portion (last y_dim)
+    logits_x = logits[..., :x_dim, :]          # [B, T, x_dim, nbins]
+    logits_y = logits[..., x_dim:x_dim+y_dim, :]  # [B, T, y_dim, nbins]
+    
+    target_bins_x = target_bins[..., :x_dim]   # [B, T, x_dim]
+    target_bins_y = target_bins[..., x_dim:x_dim+y_dim]  # [B, T, y_dim]
+
+    # 2) Flatten for cross entropy
+    #    => from (B, T, x_dim, nbins) to (B*T*x_dim, nbins)
+    B, T, _, nbins = logits_x.shape
+    logits_x_flat = logits_x.reshape(-1, nbins)
+    targets_x_flat = target_bins_x.reshape(-1)
+
+    B, T, _, nbins = logits_y.shape
+    logits_y_flat = logits_y.reshape(-1, nbins)
+    targets_y_flat = target_bins_y.reshape(-1)
+
+    # 3) Compute CE for X and Y, then combine
+    loss_x = F.cross_entropy(logits_x_flat, targets_x_flat, reduction=reduction)
+    loss_y = F.cross_entropy(logits_y_flat, targets_y_flat, reduction=reduction)
+
+    return loss_x, loss_y 
+
+def mse_loss(
+    preds: torch.Tensor,
+    targets: torch.Tensor,
+    x_dim: int,
+    y_dim: int,
+    reduction: str = "mean"
+) -> torch.Tensor:
+    """
+    Compute MSE for X portion and Y portion separately, then return the sum (or average).
+
+    Args:
+        preds:     [B, T, x_dim + y_dim], model predictions (continuous)
+        targets:   [B, T, x_dim + y_dim], ground-truth
+        x_dim:     number of features allocated to X
+        y_dim:     number of features allocated to Y
+        reduction: "mean", "sum", or "none" (passed to MSE).
+                   Typically "mean", so each partial loss is averaged.
+
+    Returns:
+        A single scalar combining the MSE for X and Y. (Sum or average of MSEs.)
+    """
+    # 1) Separate out the X portion and Y portion
+    preds_x = preds[..., :x_dim]     # [B, T, x_dim]
+    preds_y = preds[..., x_dim: x_dim+y_dim]  # [B, T, y_dim]
+
+    targets_x = targets[..., :x_dim] # [B, T, x_dim]
+    targets_y = targets[..., x_dim: x_dim+y_dim]
+
+    # 2) Compute MSE for X portion
+    #    For "mean" or "sum" or "none", PyTorch's F.mse_loss can do it directly
+    loss_x = F.mse_loss(preds_x, targets_x, reduction=reduction)
+    loss_y = F.mse_loss(preds_y, targets_y, reduction=reduction)
+
+    # 3) Combine them. Commonly you sum them or average them.
+    #    If reduction="mean", each MSE is already an average over all X or all Y elements,
+    return loss_x, loss_y 
 
 
 def exploration_loss_fn(x_batch: torch.Tensor, model):

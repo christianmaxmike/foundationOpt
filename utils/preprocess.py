@@ -17,18 +17,28 @@ def load_and_preprocess_data(data_config, sequence_length=None, device=None):
             x_dim, y_dim, x_min, x_max, y_min, y_max, transform_type
     """
     dataset_path = data_config['dataset_path']
-    all_x = []
-    all_y = []
-    for file in os.listdir(dataset_path):
-        if file.endswith(".npz"):
-            filepath = os.path.join(dataset_path, file)
-            with np.load(filepath) as npz_file:
-                part_x = npz_file["x_pt"]
-                part_y = npz_file["y_pt"]
-                all_x.append(part_x)
-                all_y.append(part_y)
-    X = np.concatenate(all_x, axis=0)  # shape [N, T, D]
-    y = np.concatenate(all_y, axis=0)  # shape [N, T, Ydim] or [N, T]
+    transform_type = data_config.get('transform_type', None)
+    version = data_config.get('version', "0_99")
+    if transform_type:
+        filename = f"data_merged_{transform_type}_{version}.npz"
+    else:
+        filename = f"data_merged_{version}.npz"
+    data = np.load(os.path.join(dataset_path, filename))
+    X = data["x"]
+    y = data["y"]
+
+    # all_x = []
+    # all_y = []
+    # for file in os.listdir(dataset_path):
+    #     if file.endswith(".npz"):
+    #         filepath = os.path.join(dataset_path, file)
+    #         with np.load(filepath) as npz_file:
+    #             part_x = npz_file[f"x_{transform_type}"]
+    #             part_y = npz_file[f"y_{transform_type}"]
+    #             all_x.append(part_x)
+    #             all_y.append(part_y)
+    # X = np.concatenate(all_x, axis=0)  # shape [N, T, D]
+    # y = np.concatenate(all_y, axis=0)  # shape [N, T, Ydim] or [N, T]
 
     print ("X shape ", X.shape)
     print ("y shape", y.shape)
@@ -39,63 +49,62 @@ def load_and_preprocess_data(data_config, sequence_length=None, device=None):
     print ("X_best shape", X_best.shape)
     print ("y_best shape", y_best.shape)
 
-    transform_type = data_config.get('transform_type', 'none')
-    if transform_type == 'minmax':
-        # Process X
-        shape_x = X.shape
-        X_2d = X.reshape(-1, shape_x[-1])
-        x_min_arr = X_2d.min(axis=0)
-        x_max_arr = X_2d.max(axis=0)
-        x_min = float(x_min_arr[0]) if x_min_arr.ndim > 0 else float(x_min_arr)
-        x_max = float(x_max_arr[0]) if x_max_arr.ndim > 0 else float(x_max_arr)
-        denom = (x_max - x_min) + 1e-10
-        X_2d = (X_2d - x_min) / denom
-        X = X_2d.reshape(shape_x)
+    # if transform_type == 'minmax':
+    #     # Process X
+    #     shape_x = X.shape
+    #     X_2d = X.reshape(-1, shape_x[-1])
+    #     x_min_arr = X_2d.min(axis=0)
+    #     x_max_arr = X_2d.max(axis=0)
+    #     x_min = float(x_min_arr[0]) if x_min_arr.ndim > 0 else float(x_min_arr)
+    #     x_max = float(x_max_arr[0]) if x_max_arr.ndim > 0 else float(x_max_arr)
+    #     denom = (x_max - x_min) + 1e-10
+    #     X_2d = (X_2d - x_min) / denom
+    #     X = X_2d.reshape(shape_x)
         
-        # Process y
-        shape_y = y.shape
-        Y_2d = y.reshape(-1, shape_y[-1])
-        y_min_arr = Y_2d.min(axis=0)
-        y_max_arr = Y_2d.max(axis=0)
-        y_min = float(y_min_arr[0]) if y_min_arr.ndim > 0 else float(y_min_arr)
-        y_max = float(y_max_arr[0]) if y_max_arr.ndim > 0 else float(y_max_arr)
-        denom_y = (y_max - y_min) + 1e-10
-        Y_2d = (Y_2d - y_min) / denom_y
-        y = Y_2d.reshape(shape_y)
+    #     # Process y
+    #     shape_y = y.shape
+    #     Y_2d = y.reshape(-1, shape_y[-1])
+    #     y_min_arr = Y_2d.min(axis=0)
+    #     y_max_arr = Y_2d.max(axis=0)
+    #     y_min = float(y_min_arr[0]) if y_min_arr.ndim > 0 else float(y_min_arr)
+    #     y_max = float(y_max_arr[0]) if y_max_arr.ndim > 0 else float(y_max_arr)
+    #     denom_y = (y_max - y_min) + 1e-10
+    #     Y_2d = (Y_2d - y_min) / denom_y
+    #     y = Y_2d.reshape(shape_y)
         
-        # For minmax, after normalization, the domain is [0,1]
-        x_min, x_max = 0.0, 1.0
-        y_min, y_max = 0.0, 1.0
+    #     # For minmax, after normalization, the domain is [0,1]
+    #     x_min, x_max = 0.0, 1.0
+    #     y_min, y_max = 0.0, 1.0
 
-    elif transform_type == 'power':
-        if yeojohnson is None:
-            raise RuntimeError("scipy.stats not available. Install scipy or remove 'power' transform.")
-        shape_x = X.shape
-        X_2d = X.reshape(-1, shape_x[-1])
-        for d in range(X_2d.shape[1]):
-            X_2d[:, d], _ = yeojohnson(X_2d[:, d])
-        X = X_2d.reshape(shape_x)
+    # elif transform_type == 'power':
+    #     if yeojohnson is None:
+    #         raise RuntimeError("scipy.stats not available. Install scipy or remove 'power' transform.")
+    #     shape_x = X.shape
+    #     X_2d = X.reshape(-1, shape_x[-1])
+    #     for d in range(X_2d.shape[1]):
+    #         X_2d[:, d], _ = yeojohnson(X_2d[:, d])
+    #     X = X_2d.reshape(shape_x)
         
-        shape_y = y.shape
-        Y_2d = y.reshape(-1, shape_y[-1])
-        for d in range(Y_2d.shape[1]):
-            Y_2d[:, d], _ = yeojohnson(Y_2d[:, d])
-        y = Y_2d.reshape(shape_y)
+    #     shape_y = y.shape
+    #     Y_2d = y.reshape(-1, shape_y[-1])
+    #     for d in range(Y_2d.shape[1]):
+    #         Y_2d[:, d], _ = yeojohnson(Y_2d[:, d])
+    #     y = Y_2d.reshape(shape_y)
         
-        # Derive global bounds from the transformed data.
-        x_min = float(X_2d.min())
-        x_max = float(X_2d.max())
-        y_min = float(Y_2d.min())
-        y_max = float(Y_2d.max())
-    else:
-        shape_x = X.shape
-        X_2d = X.reshape(-1, shape_x[-1])
-        x_min = float(X_2d.min())
-        x_max = float(X_2d.max())
-        shape_y = y.shape
-        Y_2d = y.reshape(-1, shape_y[-1])
-        y_min = float(Y_2d.min())
-        y_max = float(Y_2d.max())
+    #     # Derive global bounds from the transformed data.
+    #     x_min = float(X_2d.min())
+    #     x_max = float(X_2d.max())
+    #     y_min = float(Y_2d.min())
+    #     y_max = float(Y_2d.max())
+    # else:
+    shape_x = X.shape
+    X_2d = X.reshape(-1, shape_x[-1])
+    x_min = float(X_2d.min())
+    x_max = float(X_2d.max())
+    shape_y = y.shape
+    Y_2d = y.reshape(-1, shape_y[-1])
+    y_min = float(Y_2d.min())
+    y_max = float(Y_2d.max())
     
     # Split into train/val/test.
     train_ratio = data_config.get('train_ratio', 0.8)

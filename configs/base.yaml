@@ -4,9 +4,10 @@ wandb:
   project: FoundOpt
 
 data:
-  dataset_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/"
-  transform_type: "power"
-  models_path: "/work/dlclarge1/janowski-opt/data/simple/single/1D/models_0.dill"
+  dataset_path: /anvme/workspace/b250be13-opt/data/sineCos/single/1D_bench
+  transform_type: null
+  models_path: "/anvme/workspace/b250be13-opt/data/sineCos/single/1D_bench/models_0.dill"
+  version: 0_99
 
 model:
   input_dim: !!int 2
@@ -15,13 +16,18 @@ model:
   num_heads: !!int 2
   dropout: !!float 0.3
   num_bins: !!int 32
+  use_positional_encoding: true
+  use_autoregressive: true
+  loss_type: ce
+  bar_dist_smoothing: !!float 0.0
+  full_support: false
 
 optimizer:
   lr: !!float 1e-4
   weight_decay: !!float 1e-5
   scheduler:
-    type: cosine
-    T_max: !!int 100
+    warmup_fraction: !!float 0.1
+    plateau_fraction: !!float 0.3
 
 training:
   batch_size: !!int 512
@@ -30,5 +36,5 @@ training:
   save_every: !!int 5
 
 losses:
-  exploration_weight: !!float 0.2
-  convergence_weight: !!float 0.2
+  exploration_weight: !!float 0.0
+  convergence_weight: !!float 0.0
