@@ -1,5 +1,27 @@
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
+from pytorch_forecasting.metrics.quantile import QuantileLoss
+import numpy as np
+
+def mse_loss(logits: torch.Tensor, target: torch.Tensor, num_quantiles=8):
+    # logits: B X T-1 x dim
+    # target: B x T-1 x dim
+    loss = nn.MSELoss()
+    return loss(logits, target)                
+
+def quantile_loss(logits: torch.Tensor, target: torch.Tensor, num_quantiles=8):
+    loss = QuantileLoss(quantiles=np.linspace(0, 1 , num_quantiles))
+    return loss(logits.reshape(-1, num_quantiles), target.reshape(-1, 1))
+
+
+def rank_loss(predicted_trajectory, true_trajectory):
+    # predicted_trajectory: B x T x 1
+    # true_trajectory: B x T x 1
+    pred_deltas = predicted_trajectory[:, 1:] - predicted_trajectory[:, :-1]
+    true_deltas = true_trajectory[:, 1:] - true_trajectory[:, :-1]
+    return torch.mean((torch.sign(pred_deltas) - torch.sign(true_deltas)) ** 2)
+
 
 def cross_entropy_binning_loss(logits: torch.Tensor, target_bins: torch.Tensor):
     """

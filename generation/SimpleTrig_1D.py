@@ -12,12 +12,12 @@ from sklearn.preprocessing import PowerTransformer
 
 
 def rec_fnc(fnc_dict, min_x_value=0, max_x_value=1, sequence_length=100):
-  x_values = np.linspace(min_x_value, max_x_value, sequence_length)  # Extend the range for more valleys
-  y_values = np.zeros_like(x_values)
-  for i in range(fnc_dict['num_components']):
-    y_values += fnc_dict['amplitudes'][i] * fnc_dict['trigonometrics'][i](fnc_dict['frequencies'][i] * x_values + fnc_dict['phases'][i])
-  y_values = (y_values + 1) / 2
-  return x_values, y_values
+    x_values = np.linspace(min_x_value, max_x_value, sequence_length)  # Extend the range for more valleys
+    y_values = np.zeros_like(x_values)
+    for i in range(fnc_dict['num_components']):
+        y_values += fnc_dict['amplitudes'][i] * fnc_dict['trigonometrics'][i](fnc_dict['frequencies'][i] * x_values + fnc_dict['phases'][i])
+    y_values = (y_values + 1) / 2
+    return x_values, y_values
 
 
 def eval_x(x, fnc_dict) -> np.ndarray:
@@ -70,9 +70,9 @@ def gen_trigonometric_fncs(batch_size, min_x_value, max_x_value, sequence_length
 
         for _ in range(num_components):
             amplitude = np.random.uniform(0.05, 0.5)    # Amplitude between 0.5 and 2.0
-            frequency = np.random.uniform(5, 20)        # Frequency between 0.5 and 2.0
-            phase = np.random.uniform(0, 5)             # Phase shift
-            trigonometric = np.sin if np.random.rand() < 0.5 else np.cos
+            frequency = 5# np.random.uniform(5, 20)        # Frequency between 0.5 and 2.0
+            phase = 2 # np.random.uniform(0, 5)             # Phase shift
+            trigonometric = np.sin # if np.random.rand() < 0.5 else np.cos
 
             amplitudes.append(amplitude)
             frequencies.append(frequency)
@@ -107,7 +107,7 @@ def run_single_hebo(args):
         opt.observe(rec, obj(rec, fnc))
         x_hebo.append(rec.iloc[0].item())
         y_hebo.append(opt.y[-1])
-    return x_hebo, y_hebo, opt.y.min()
+    return x_hebo, y_hebo # , opt.y.min()
 
 
 def run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs):
@@ -116,7 +116,7 @@ def run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs):
     """
     hebo_xs = []
     hebo_ys = []
-    hebo_ys_best = []
+    #hebo_ys_best = []
     
     # Prepare the arguments for all HEBO runs
     args = []
@@ -130,12 +130,12 @@ def run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs):
         results = list(tqdm(pool.imap(run_single_hebo, args), total=len(args), desc="HEBO Runs"))
     
     # Collect the results
-    for x_hebo, y_hebo, y_best in results:
+    for x_hebo, y_hebo in results:
         hebo_xs.append(x_hebo)
         hebo_ys.append(y_hebo)
-        hebo_ys_best.append(y_best)
+        #hebo_ys_best.append(y_best)
     
-    return hebo_xs, hebo_ys, hebo_ys_best
+    return hebo_xs, hebo_ys # , hebo_ys_best
 
 # def run_hebo(fnc_list, num_hebo_steps, num_hebo_runs):
 #     # HEBO loop
@@ -173,25 +173,36 @@ def generate(args):
 
     # run hebo
     # hebo_xs, hebo_ys = run_hebo(fnc_list, num_hebo_steps, num_hebo_runs)
-    hebo_xs, hebo_ys, hebo_ys_best = run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs)
+    hebo_xs, hebo_ys = run_hebo_parallel(fnc_list, num_hebo_steps, num_hebo_runs)
 
     # Convert data to numpy array in the right format
-    x_batch = np.stack([np.expand_dims(np.array(hebo_xs[i]), 1) for i in range(len(hebo_xs))])
-    y_batch = np.stack(hebo_ys)
-    y_batch_best = np.stack(hebo_ys_best)
+    x_batch_raw = np.stack([np.expand_dims(np.array(hebo_xs[i]), 1) for i in range(len(hebo_xs))])
+    y_batch_raw = np.stack(hebo_ys)
+    #y_batch_best = np.stack(hebo_ys_best)
 
     #y_norm = (y_batch +1 / 2) 
     #print ("before pt:\n", x_batch[0])
     pt = PowerTransformer()
-    x_batch = pt.fit_transform(x_batch.reshape(-1, 1)).reshape(x_batch.shape)
-    y_batch = pt.fit_transform(y_batch.reshape(-1, 1)).reshape(y_batch.shape)
+    x_batch_pt = pt.fit_transform(x_batch_raw.reshape(-1, 1)).reshape(x_batch_raw.shape)
+    y_batch_pt = pt.fit_transform(y_batch_raw.reshape(-1, 1)).reshape(y_batch_raw.shape)
     #y_batch_best = pt.fit_transform(y_batch_best.reshape(-1, 1)).reshape(y_batch_best.shape)
 
+    x_tmp = x_batch_pt.reshape(-1, 1)
+    x_tmp = (x_tmp-np.min(x_tmp))/(np.max(x_tmp)-np.min(x_tmp))
+    x_batch_norm = x_tmp.reshape(x_batch_pt.shape) 
+
+    y_tmp = y_batch_pt.reshape(-1, 1)
+    y_tmp = (y_tmp-np.min(y_tmp))/(np.max(y_tmp)-np.min(y_tmp))
+    y_batch_norm = y_tmp.reshape(y_batch_pt.shape)
+    
     #print ("after pt:\n", x_batch[0])
     # save batch file
-    save_batch(x_batch, 
-               y_batch,
-               y_batch_best,
+    save_batch(x_batch_raw,
+               y_batch_raw,
+               x_batch_pt,
+               y_batch_pt,
+               x_batch_norm, 
+               y_batch_norm,
                fnc_list, 
                os.path.join("datasets", "single", "1D_triv", f"data_{args.id}.npz"), 
                os.path.join("datasets", "single", "1D_triv", f"models_{args.id}.dill")

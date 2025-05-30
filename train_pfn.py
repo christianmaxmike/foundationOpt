@@ -12,13 +12,18 @@ import math
 from torch.utils.data import DataLoader, TensorDataset, RandomSampler
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, SequentialLR
 
+from schedulefree import AdamWScheduleFree
+
 # Import the updated PFNTransformer and losses.
 from model.pfn_transformer import PFNTransformer
 from model.losses import (
     exploration_loss_fn,
     convergence_loss_fn,
     cross_entropy_binning_loss,
-    bar_distribution_loss
+    bar_distribution_loss,
+    mse_loss,
+    quantile_loss,
+    rank_loss
 )
 
 from utils.preprocess import load_and_preprocess_data
@@ -33,6 +38,7 @@ def parse_args():
     parser.add_argument('--forecast_steps', type=int, default=1, help="How many steps to predict in the future.")
     parser.add_argument('--seed', type=int, default=42, help="Random seed.")
     parser.add_argument('--sequence_length', type=int, default=None, help="Length of the input sequences.")
+    parser.add_argument("--ckptAppx", type=str, default="test")
     return parser.parse_args()
 
 def main():
@@ -47,36 +53,31 @@ def main():
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     run_name = config.get('run_name', args.config)
-    ckpt_dir = os.path.join(config['training']['ckpt_dir'], run_name)
+    ckpt_dir = os.path.join(config['training']['ckpt_dir'], run_name, args.ckptAppx)
     os.makedirs(ckpt_dir, exist_ok=True)
-    
-    wandb.init(project=config.get('wandb', {}).get('project', 'FoundOpt'), name=run_name, config=config)
-    
+        
     data_config_input = config['data']
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # for mac:
-    # device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+
+    wandb.init(project=config.get('wandb', {}).get('project', 'FoundOpt'), name=f"{run_name}_{config['model']['loss_type']}_ctx", config=config)
+
+    device = ['cuda', 'mps', 'cpu'][np.argmax([torch.cuda.is_available(), torch.backends.mps.is_available(), True])]
     print (device)
     
     data_dict = load_and_preprocess_data(data_config=data_config_input, sequence_length=args.sequence_length, device=device)
     X_train = data_dict['X_train']
     X_val = data_dict['X_val']
-    X_test = data_dict['X_test']
-    
+    X_test = data_dict['X_test']    
     y_train = data_dict['y_train']
     y_val = data_dict['y_val']
     y_test = data_dict['y_test']
 
-    y_train_best = data_dict.get('y_train_best', None)
-    y_val_best = data_dict.get('y_val_best', None)
-    y_test_best = data_dict.get('y_test_best', None)
-    
-    X_train_last = data_dict.get("X_train_last", None)
-    X_test_last = data_dict.get("X_test_last", None)
-    X_val_last = data_dict.get("X_val_last", None)
+    X_train_best = data_dict.get("X_train_best", None)
+    X_test_best = data_dict.get("X_test_best", None)
+    X_val_best = data_dict.get("X_val_best", None)
     y_train_best = data_dict.get("y_train_best", None)
     y_test_best = data_dict.get("y_test_best", None)
     y_val_best = data_dict.get("y_val_best", None)
+
     data_config_model = data_dict['data_config']
     
     print(f"Derived data config: {data_config_model}")
@@ -93,22 +94,20 @@ def main():
         y_val_best = y_val_best.unsqueeze(-1)
         y_test_best = y_test_best.unsqueeze(-1)
 
-    X_train_model = torch.cat([X_train, y_train_best], dim=-1)  #  (batch x seq_len x dim_x+dim_y)
+    X_train_model = torch.cat([X_train, y_train], dim=-1)  #  (batch x seq_len x dim_x+dim_y)
     X_val_model = torch.cat([X_val, y_val], dim=-1)
     X_test_model = torch.cat([X_test, y_test], dim=-1)
         
     batch_size = config['training'].get('batch_size', 256)
 
-    # train_dataset = TensorDataset(X_train_model, y_train)
-    # train_dataset = TensorDataset(X_train_model, y_train_best)
-    train_dataset = TensorDataset(X_train_model, X_train_last, y_train_best)
-    val_dataset = TensorDataset(X_val_model, X_val_last, y_val_best)
+    train_dataset = TensorDataset(X_train_model, X_train_best, y_train_best)
+    val_dataset = TensorDataset(X_val_model, X_val_best, y_val_best)
 
     train_sampler = RandomSampler(train_dataset)
     val_sampler = RandomSampler(val_dataset)
     
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler) #, drop_last=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler) # , drop_last=True)
     
     # Build Model: pass the transformation bounds and dimensions from data_config_model.
     model_config = config['model']
@@ -136,14 +135,20 @@ def main():
         x_max=data_config_model['x_max'],
         y_min=data_config_model['y_min'],
         y_max=data_config_model['y_max'],
-        train_data=X_train
+        train_data=X_train,
+        loss_type=loss_type,
+        device=device,
+        ctx_length= model_config.get('ctx_length', 5)
     ).to(device)
+    pytorch_total_params = sum(p.numel() for p in model.parameters())
+    print ("Number of parameters:\t", pytorch_total_params)
 
     # Optimizer & LR Scheduler
     optim_config = config['optimizer']
     lr = optim_config.get('lr', 1e-4)
     weight_decay = optim_config.get('weight_decay', 1e-5)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # optimizer = AdamWScheduleFree(model.parameters(), lr=lr, weight_decay=weight_decay)
     epochs = config['training'].get('epochs', 20)
     total_steps = epochs * len(train_dataloader)
     sched_cfg = optim_config.get('scheduler', {})
@@ -170,7 +175,6 @@ def main():
     epochs_no_improve = 0 
     best_model_state_dict = None
 
-
     # log run configs
     wandb.watch(model)
     wandb.config.num_bins = model_config.get('num_bins', 32)
@@ -186,22 +190,25 @@ def main():
     wandb.config.opt_weight_decay = optim_config.get('weight_decay', 1e-5)
     wandb.config.epochs = config['training'].get('epochs', 20)
     wandb.config.patience = tr_cfg.get("early_stopping").get("patience", 5)
+    wandb.config.ctx_length = model_config.get('ctx_length', 5)
 
     
     global_step = 0
     for epoch in tqdm(range(epochs), desc="Epoch"):
         model.train()
+        # optimizer.train()
         total_loss = 0.0
         for batch in train_dataloader:
-            x_batch, x_train_last, target_y_best = batch
+            x_batch, x_train_best, target_y_best = batch
             # x_batch = x_batch  #[0]  # [B, T, input_dim]
 
             optimizer.zero_grad()
-            logits, target_bins = model.forward_with_binning(x_batch, x_train_last)
+            logits, target_bins = model.forward_with_binning(x_batch, x_train_best, ctx_length=model_config.get("ctx_length", 0))
             # logits: [B, T_out, (x_dim+y_dim), num_bins]
             # target_bins: [B, T_out, (x_dim+y_dim)]
-            B, T_out, D, num_bins = logits.shape
+
             if loss_type == "bar":
+                B, T_out, D, num_bins = logits.shape
                 logits_x = logits[..., :x_dim, :]  # Batch x seq-1 x 1 x emb_size
                 logits_y = logits[..., x_dim:, :]
                 
@@ -215,21 +222,54 @@ def main():
                 bin_acc_y_train = (pred_bins_y == model.bar_distribution_y.map_to_bucket_idx(target_y)).float().mean()
                 # bin_acc_y_train = (pred_bins_y == model.orh_y(target_y).argmax(dim=-1, keepdims=True)).float().mean()
 
-                loss_x = bar_distribution_loss(model.bar_distribution_x, logits_x, target_x, model.orh_x)
-                loss_y = bar_distribution_loss(model.bar_distribution_y, logits_y, target_y, model.orh_y)
-                loss_y_best = bar_distribution_loss(model.bar_distribution_y, logits_y, target_y_best, model.orh_y)
-
+                loss_x = bar_distribution_loss(model.bar_distribution_x, logits_x, target_x, model.orh_x) # logits_x: B, T-1, dim, bins
+                loss_y = bar_distribution_loss(model.bar_distribution_y, logits_y, target_y, model.orh_y) # target_x: B, T-1, dim
+                # loss_y_best = bar_distribution_loss(model.bar_distribution_y, logits_y, target_y_best, model.orh_y)
+                loss_y_best = torch.tensor(torch.nan)
                 main_loss = (loss_x + loss_y) 
+            else: # logits shape: B x T-1 x (x_dim + y_dim)
+                if loss_type == "mse":
+                    logits_x = logits[..., :x_dim]
+                    logits_y = logits[..., x_dim:]
+                    target_x = target_bins[..., :x_dim]
+                    target_y = target_bins[..., x_dim:]
+                    loss_x = mse_loss(logits_x, target_x)
+                    loss_y = mse_loss(logits_y, target_y)
+                    loss_x_best = mse_loss(logits_x, x_train_best[:, model_config.get("ctx_length", 0)+1:, :])
+                    loss_y_best = mse_loss(logits_y, target_y_best[:, model_config.get("ctx_length", 0)+1:, :])
+                    if model_config.get("target", "next") == "next":
+                        main_loss = loss_x + loss_y + loss_y_best
+                    else:
+                        main_loss = loss_x_best + loss_y_best
+                elif loss_type == "rank":
+                    logits_x = logits[..., :x_dim]  # B x T-1 x x_dim
+                    logits_y = logits[..., x_dim:]  # B x T-1 x y_dim
+                    target_x = target_bins[..., :x_dim] # B x T-1 x x_dim ; but 
+                    target_y = target_bins[..., x_dim:]
+                    loss_x = mse_loss(logits_x, target_x)
+                    loss_y = mse_loss(logits_y, target_y)
+                    loss_y_rank = rank_loss(logits_y, target_y)
+                    main_loss = (loss_x+loss_y) + loss_y_rank
+                    loss_y_best = mse_loss(logits_y, target_y_best[:, model_config.get("ctx_length", 0)+1:, :])
 
-            else:
-                logits_x = logits[..., :x_dim, :]
-                logits_y = logits[..., x_dim:, :]
-                
-                logits_flat = logits_y # .view(B*T_out*1, num_bins)
-                # logits_flat = logits.view(B * T_out * D, num_bins)
-                targets_flat = target_bins.view(B * T_out * target_bins.shape[-1])
-                loss_y_best=torch.tensor(np.nan)
-                main_loss = cross_entropy_binning_loss(logits_flat, targets_flat)
+                elif loss_type == "quantile":
+                    logits_x = logits[..., :16] 
+                    logits_y = logits[..., 16:]
+                    target_x = target_bins[..., :x_dim]
+                    target_y = target_bins[..., x_dim:]
+                    loss_x = quantile_loss(logits_x, target_x)
+                    loss_y = quantile_loss(logits_y, target_y)
+                    main_loss = loss_x + loss_y
+                    loss_y_best=torch.tensor(np.nan)
+                else:
+                    logits_x = logits[..., :x_dim, :]
+                    logits_y = logits[..., x_dim:, :]
+                    
+                    logits_flat = logits_y # .view(B*T_out*1, num_bins)
+                    # logits_flat = logits.view(B * T_out * D, num_bins)
+                    targets_flat = target_bins.view(B * T_out * target_bins.shape[-1])
+                    # loss_y_best=torch.tensor(np.nan)
+                    main_loss = cross_entropy_binning_loss(logits_flat, targets_flat)
             exploration_weight = config['losses'].get('exploration_weight', 0.1) if args.exploration_loss else 0.0
             convergence_weight = config['losses'].get('convergence_weight', 0.1) if args.convergence_loss else 0.0
             exploration_term = exploration_loss_fn(x_batch, model) * exploration_weight
@@ -248,10 +288,11 @@ def main():
                 "train/regret": loss_y_best.item(),
                 "train/x_loss": loss_x.item(),
                 "train/y_loss": loss_y.item(),
-                "train/accBinX": bin_acc_x_train.item(),
-                "train/accBinY": bin_acc_y_train.item()
+                "train/accBinX": 0 if loss_type in ['rank', 'mse', 'quantile'] else bin_acc_x_train.item(),
+                "train/accBinY": 0 if loss_type in ['rank', 'mse', 'quantile'] else bin_acc_y_train.item()
             })
         model.eval()
+        # optimizer.eval()
         val_loss = 0.0
         regret_loss = 0.0
         bin_acc_x = 0.0
@@ -260,9 +301,9 @@ def main():
             for batch in val_dataloader:
                 # x_batch = batch[0]
                 x_batch, x_val_last, target_y_best = batch
-                logits, target_bins = model.forward_with_binning(x_batch, x_val_last)
-                B, T_out, D, num_bins = logits.shape
+                logits, target_bins = model.forward_with_binning(x_batch, x_val_last, ctx_length=model_config.get("ctx_length", 0))
                 if loss_type == "bar":
+                    B, T_out, D, num_bins = logits.shape
                     logits_x = logits[..., :x_dim, :]
                     logits_y = logits[..., x_dim:, :]
                     target_x = target_bins[..., :x_dim]
@@ -276,34 +317,73 @@ def main():
                     bin_acc_y += (pred_bins_y == model.bar_distribution_y.map_to_bucket_idx(target_y)).float().mean()
                     # bin_acc_y += (pred_bins_x == model.orh_y(target_y).argmax(dim=-1, keepdims=True)).float().mean()
 
-                    loss_x = bar_distribution_loss(model.bar_distribution_x, logits_x, target_x, model.orh_x)
-                    loss_y = bar_distribution_loss(model.bar_distribution_y, logits_y, target_y, model.orh_y)
-                    loss_y_best = bar_distribution_loss(model.bar_distribution_y, logits_y, target_y_best, model.orh_y)
-                    regret_loss += loss_y_best.item()
+                    loss_x = bar_distribution_loss(model.bar_distribution_x, logits_x, target_x, model.orh_x)  
+                    loss_y = bar_distribution_loss(model.bar_distribution_y, logits_y, target_y, model.orh_y)  
+                    # loss_y_best = bar_distribution_loss(model.bar_distribution_y, logits_y, target_y_best, model.orh_y)
+                    regret_loss += 0 # loss_y_best.item()
                     val_loss += (loss_x + loss_y).item()
                 else:
-                    logits_x = logits[..., :x_dim, :]
-                    logits_y = logits[..., x_dim:, :]
-                    
-                    logits_flat = logits_y# .view(B*T_out*1, num_bins)
+                    if loss_type == "mse":
+                        logits_x = logits[..., :x_dim]
+                        logits_y = logits[..., x_dim:]
+                        target_x = target_bins[..., :x_dim]
+                        target_y = target_bins[..., x_dim:]
+                        loss_x = mse_loss(logits_x, target_x)
+                        loss_y = mse_loss(logits_y, target_y)
+                        loss_y_best = mse_loss(logits_y, target_y_best[:, model_config.get("ctx_length", 0)+1:, :])
+                        if model_config.get("target", "next") == "next":
+                            val_loss += loss_x + loss_y
+                        else:
+                            val_loss += loss_x_best + loss_y_best
+                        regret_loss += loss_y_best.item()
+                    elif loss_type == "rank":
+                        logits_x = logits[..., :x_dim]
+                        logits_y = logits[..., x_dim:]
+                        target_x = target_bins[..., :x_dim]
+                        target_y = target_bins[..., x_dim:]
+                        loss_x = mse_loss(logits_x, target_x)
+                        loss_y = mse_loss(logits_y, target_y)
+                        loss_y_rank = rank_loss(logits_y, target_y)
+                        val_loss += (loss_x + loss_y) + loss_y_rank
+                        loss_y_best = mse_loss(logits_y, target_y_best[:, model_config.get("ctx_length", 0)+1:, :])
+                        regret_loss += loss_y_best.item()
+                    elif loss_type == "quantile":
+                        logits_x = logits[..., :16] 
+                        logits_y = logits[..., 16:] 
+                        target_x = target_bins[..., :x_dim]
+                        target_y = target_bins[..., x_dim:]
+                        loss_x = quantile_loss(logits_x, target_x)
+                        loss_y = quantile_loss(logits_y, target_y)
+                        val_loss += loss_x + loss_y
+                        regret_loss = 0
+                    else:
+                        logits_x = logits[..., :x_dim, :]
+                        logits_y = logits[..., x_dim:, :]
+                        
+                        logits_flat = logits_y# .view(B*T_out*1, num_bins)
 
-                    # logits_flat = logits.view(B * T_out * D, num_bins)
-                    #targets_flat = target_bins.view(B * T_out * D)
-                    targets_flat = target_bins.view(B * T_out * target_bins.shape[-1])
+                        # logits_flat = logits.view(B * T_out * D, num_bins)
+                        #targets_flat = target_bins.view(B * T_out * D)
+                        targets_flat = target_bins.view(B * T_out * target_bins.shape[-1])
 
-                    val_loss += cross_entropy_binning_loss(logits_flat, targets_flat).item()
+                        val_loss += cross_entropy_binning_loss(logits_flat, targets_flat).item()
         val_loss /= len(val_dataloader)
         avg_train_loss = total_loss / len(train_dataloader)
         avg_regret_loss = regret_loss / len(val_dataloader)
-        avg_bin_acc_x = bin_acc_x / len(val_dataloader)
-        avg_bin_acc_y = bin_acc_y / len(val_dataloader)
+        if loss_type=="bar":
+            avg_bin_acc_x = bin_acc_x / len(val_dataloader)
+            avg_bin_acc_y = bin_acc_y / len(val_dataloader)
+        
         wandb.log({
             "epoch": epoch,
             "epoch_train_loss": avg_train_loss,
             "val/epoch_val_loss": val_loss,
             "val/avg_regret": avg_regret_loss
         })
-        print(f"[Epoch {epoch}] train_loss={avg_train_loss:.4f}, val_loss={val_loss:.4f}, AccBin=(X:{avg_bin_acc_x:.2f}, Y:{avg_bin_acc_y:.2f})")
+        if loss_type in ["rank", "mse", "quantile"]:
+            print(f"[Epoch {epoch}] train_loss={avg_train_loss:.4f}, val_loss={val_loss:.4f})")
+        else:
+            print(f"[Epoch {epoch}] train_loss={avg_train_loss:.4f}, val_loss={val_loss:.4f}, AccBin=(X:{avg_bin_acc_x:.2f}, Y:{avg_bin_acc_y:.2f})")
         if (epoch + 1) % config['training'].get('save_every', 10) == 0:
             ckpt_path = os.path.join(ckpt_dir, f"model_epoch{epoch+1}.pth")
             torch.save(model.state_dict(), ckpt_path)

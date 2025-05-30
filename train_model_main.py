@@ -129,7 +129,11 @@ def run_study(trial: Trial, X, y, args) -> float:
     # Define the warm-up duration in terms of steps (independent of epochs)
     warmup_steps = 2000 # iterations_per_epoch * (0.05 * nr_epochs) # 5000  # Example: 1000 steps for warm-up
     plateau_steps = 1000 # iterations_per_epoch * (0.05 * nr_epochs) # 500  # Optional: Add a plateau phase after warm-up
-
+    
+    total_steps = nr_epochs * ((X_train.shape[0]// batch_size)+1)
+    warmup_steps = int(0.1 * total_steps)
+    plateau_steps = int(0.3 * total_steps)
+    remaining_steps = max(1, total_steps - (warmup_steps + plateau_steps))
     # Define the total number of iterations (steps) for the entire training
     # total_iterations = iterations_per_epoch * nr_epochs
 
@@ -140,12 +144,12 @@ def run_study(trial: Trial, X, y, args) -> float:
         elif current_step < warmup_steps + plateau_steps:
             return 1.0  # Plateau phase
         else:
-            return 0.0  # Transition to cosine annealing
+            return 1.0  # Transition to cosine annealing
 
     # Schedulers
     scheduler1 = LambdaLR(optimizer, lr_lambda=warmup_with_plateau)
-    scheduler2 = CosineAnnealingLR(optimizer, T_max=1000) # total_iterations - warmup_steps - plateau_steps)
-    scheduler3 = ExponentialLR(optimizer, gamma=0.7)
+    scheduler2 = CosineAnnealingLR(optimizer, T_max=remaining_steps) # total_iterations - warmup_steps - plateau_steps)
+    #scheduler3 = ExponentialLR(optimizer, gamma=0.7)
     # Sequential scheduler
     scheduler = SequentialLR(
         optimizer,
